@@ -211,7 +211,7 @@ class DatasetCatalog:
         dataset = self.get(dataset_id_or_name)
         if dataset is None:
             return None
-        return dataset.get("style") or fallback_style(dataset.get("geometry_types"))
+        return normalize_style(dataset.get("style"), dataset.get("geometry_types"))
 
     def enrich(self, dataset_id_or_name: str, llm: Any) -> dict[str, Any] | None:
         self.init_db()
@@ -520,12 +520,35 @@ def normalize_style(style: Any, geometry_types: list[str] | None) -> dict[str, A
         return base
     if isinstance(style.get("layers"), dict):
         for layer_type in ("fill", "line", "circle"):
-            paint = style["layers"].get(layer_type)
-            if isinstance(paint, dict):
+            paint = normalize_layer_paint(style["layers"].get(layer_type), layer_type)
+            if paint:
                 base["layers"][layer_type].update(paint)
-    if style.get("source_layer"):
-        base["source_layer"] = style["source_layer"]
     return base
+
+
+def normalize_layer_paint(layer_style: Any, layer_type: str) -> dict[str, Any]:
+    if not isinstance(layer_style, dict):
+        return {}
+
+    paint: dict[str, Any] = {}
+    for key, value in layer_style.items():
+        if is_supported_paint_property(key, value, layer_type):
+            paint[key] = value
+
+    nested_paint = layer_style.get("paint")
+    if isinstance(nested_paint, dict):
+        for key, value in nested_paint.items():
+            if is_supported_paint_property(key, value, layer_type):
+                paint[key] = value
+    return paint
+
+
+def is_supported_paint_property(key: Any, value: Any, layer_type: str) -> bool:
+    return (
+        isinstance(key, str)
+        and key.startswith(f"{layer_type}-")
+        and isinstance(value, str | int | float | bool | list | dict)
+    )
 
 
 def enrichment_payload(dataset: dict[str, Any]) -> dict[str, Any]:

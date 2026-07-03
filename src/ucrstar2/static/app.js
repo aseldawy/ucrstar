@@ -2,6 +2,42 @@ const SOURCE_LAYER = "layer0";
 const DATASET_SOURCE = "active-dataset";
 const DATASET_LAYERS = ["dataset-fill", "dataset-line", "dataset-circle"];
 const FORMATS = ["geojson", "csv", "parquet", "zip"];
+const DEFAULT_DATASET_STYLE = {
+  source_layer: SOURCE_LAYER,
+  layers: {
+    fill: {
+      "fill-color": "#2a9d8f",
+      "fill-opacity": 0.25,
+    },
+    line: {
+      "line-color": "#0f6b99",
+      "line-width": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        2,
+        0.7,
+        9,
+        2.5,
+      ],
+      "line-opacity": 0.88,
+    },
+    circle: {
+      "circle-color": "#d1495b",
+      "circle-radius": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        2,
+        2,
+        10,
+        5,
+      ],
+      "circle-stroke-color": "#ffffff",
+      "circle-stroke-width": 0.8,
+    },
+  },
+};
 
 const state = {
   activeDataset: null,
@@ -193,8 +229,8 @@ async function selectDataset(datasetId, options = {}) {
 async function showDatasetOnMap(dataset, options = {}) {
   clearDatasetLayer();
   const style = await fetchDatasetStyle(dataset);
-  const sourceLayer = style.source_layer || SOURCE_LAYER;
-  const layers = style.layers || {};
+  const sourceLayer = style.source_layer;
+  const layers = style.layers;
 
   map.addSource(DATASET_SOURCE, {
     type: "vector",
@@ -205,59 +241,31 @@ async function showDatasetOnMap(dataset, options = {}) {
     maxzoom: 14,
   });
 
-  map.addLayer({
+  addDatasetLayer({
     id: "dataset-fill",
     type: "fill",
     source: DATASET_SOURCE,
     "source-layer": sourceLayer,
     filter: ["==", ["geometry-type"], "Polygon"],
-    paint: layers.fill || {
-      "fill-color": "#2a9d8f",
-      "fill-opacity": 0.25,
-    },
-  });
+    paint: layers.fill,
+  }, DEFAULT_DATASET_STYLE.layers.fill);
 
-  map.addLayer({
+  addDatasetLayer({
     id: "dataset-line",
     type: "line",
     source: DATASET_SOURCE,
     "source-layer": sourceLayer,
-    paint: layers.line || {
-      "line-color": "#0f6b99",
-      "line-width": [
-        "interpolate",
-        ["linear"],
-        ["zoom"],
-        2,
-        0.7,
-        9,
-        2.5,
-      ],
-      "line-opacity": 0.88,
-    },
-  });
+    paint: layers.line,
+  }, DEFAULT_DATASET_STYLE.layers.line);
 
-  map.addLayer({
+  addDatasetLayer({
     id: "dataset-circle",
     type: "circle",
     source: DATASET_SOURCE,
     "source-layer": sourceLayer,
     filter: ["==", ["geometry-type"], "Point"],
-    paint: layers.circle || {
-      "circle-color": "#d1495b",
-      "circle-radius": [
-        "interpolate",
-        ["linear"],
-        ["zoom"],
-        2,
-        2,
-        10,
-        5,
-      ],
-      "circle-stroke-color": "#ffffff",
-      "circle-stroke-width": 0.8,
-    },
-  });
+    paint: layers.circle,
+  }, DEFAULT_DATASET_STYLE.layers.circle);
 
   if (Array.isArray(dataset.mbr) && dataset.mbr.length === 4) {
     if (options.fitBounds === false) {
@@ -275,9 +283,71 @@ async function showDatasetOnMap(dataset, options = {}) {
 
 async function fetchDatasetStyle(dataset) {
   try {
-    return await fetchJson(`/datasets/${encodeURIComponent(dataset.id)}/style.json`);
+    const style = await fetchJson(`/datasets/${encodeURIComponent(dataset.id)}/style.json`);
+    return normalizeDatasetStyle(style);
   } catch (error) {
+    return normalizeDatasetStyle({});
+  }
+}
+
+function normalizeDatasetStyle(style) {
+  const normalized = cloneDefaultDatasetStyle();
+  if (!style || typeof style !== "object" || !style.layers || typeof style.layers !== "object") {
+    return normalized;
+  }
+
+  for (const layerType of ["fill", "line", "circle"]) {
+    const paint = normalizeLayerPaint(style.layers[layerType], layerType);
+    Object.assign(normalized.layers[layerType], paint);
+  }
+  return normalized;
+}
+
+function cloneDefaultDatasetStyle() {
+  return JSON.parse(JSON.stringify(DEFAULT_DATASET_STYLE));
+}
+
+function normalizeLayerPaint(layerStyle, layerType) {
+  if (!layerStyle || typeof layerStyle !== "object" || Array.isArray(layerStyle)) {
     return {};
+  }
+
+  const paint = {};
+  for (const [key, value] of Object.entries(layerStyle)) {
+    if (isSupportedPaintProperty(key, value, layerType)) {
+      paint[key] = value;
+    }
+  }
+
+  if (layerStyle.paint && typeof layerStyle.paint === "object" && !Array.isArray(layerStyle.paint)) {
+    for (const [key, value] of Object.entries(layerStyle.paint)) {
+      if (isSupportedPaintProperty(key, value, layerType)) {
+        paint[key] = value;
+      }
+    }
+  }
+  return paint;
+}
+
+function isSupportedPaintProperty(key, value, layerType) {
+  return (
+    key.startsWith(`${layerType}-`)
+    && (
+      typeof value === "string"
+      || typeof value === "number"
+      || typeof value === "boolean"
+      || Array.isArray(value)
+      || (value !== null && typeof value === "object")
+    )
+  );
+}
+
+function addDatasetLayer(layer, fallbackPaint) {
+  try {
+    map.addLayer(layer);
+  } catch (error) {
+    console.warn(`Dataset style rejected for ${layer.id}; using fallback style.`, error);
+    map.addLayer({ ...layer, paint: fallbackPaint });
   }
 }
 

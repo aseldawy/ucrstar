@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ucrstar2.catalog import DatasetCatalog
+from ucrstar2.catalog import DatasetCatalog, normalize_style
 
 
 def test_catalog_sync_keeps_stable_id(tmp_path: Path, monkeypatch) -> None:
@@ -104,6 +104,44 @@ def test_catalog_enriches_style_and_embedding(tmp_path: Path, monkeypatch) -> No
     assert deleted["name"] == "roads"
     assert catalog.get(dataset["id"]) is None
     assert catalog.semantic_search("streets", FakeLLM(), {}, limit=5) == []
+
+
+def test_normalize_style_flattens_nested_paint_and_ignores_source_layer() -> None:
+    style = {
+        "source_layer": "cemetery",
+        "layers": {
+            "fill": {
+                "fill-color": "#2a9d8f",
+                "paint": {"fill-color": "#add8e6", "fill-opacity": 0.5},
+            },
+            "line": {
+                "line-color": "#0f6b99",
+                "paint": {
+                    "line-color": "#808080",
+                    "line-width": 2,
+                    "paint": {"line-color": "#000000"},
+                },
+            },
+            "circle": {
+                "circle-color": "#d1495b",
+                "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 2, 10, 5],
+                "paint": {"circle-color": "#808080", "circle-radius": 5},
+            },
+        },
+    }
+
+    normalized = normalize_style(style, ["Point"])
+
+    assert normalized["source_layer"] == "layer0"
+    assert normalized["layers"]["fill"] == {
+        "fill-color": "#add8e6",
+        "fill-opacity": 0.5,
+    }
+    assert normalized["layers"]["line"]["line-color"] == "#808080"
+    assert normalized["layers"]["line"]["line-width"] == 2
+    assert "paint" not in normalized["layers"]["line"]
+    assert normalized["layers"]["circle"]["circle-color"] == "#808080"
+    assert normalized["layers"]["circle"]["circle-radius"] == 5
 
 
 def test_catalog_logs_llm_enrichment_failures(
