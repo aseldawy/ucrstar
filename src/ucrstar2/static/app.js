@@ -541,6 +541,10 @@ function applyMapUrlState(urlState) {
 
 function readUrlState() {
   const params = new URLSearchParams(window.location.search);
+  const compactState = readCompactUrlState(params);
+  if (compactState) {
+    return compactState;
+  }
   return {
     lng: parseNumberParam(params.get("lng")),
     lat: parseNumberParam(params.get("lat")),
@@ -550,24 +554,53 @@ function readUrlState() {
   };
 }
 
+function readCompactUrlState(params) {
+  const token = window.location.search.slice(1).split("&")[0] || "";
+  if (!token || token.includes("=") || !token.includes("@")) {
+    return null;
+  }
+
+  const [datasetToken, locationToken] = token.split("@", 2);
+  const location = locationToken.split(",");
+  if (location.length !== 3) {
+    return null;
+  }
+
+  const lat = parseNumberParam(location[0]);
+  const lng = parseNumberParam(location[1]);
+  const z = parseNumberParam(location[2]);
+  return {
+    lng,
+    lat,
+    z,
+    dataset: datasetToken ? safeDecodeURIComponent(datasetToken) : "",
+    q: params.get("q") || "",
+  };
+}
+
 function updateUrl(options = {}) {
   if (state.isApplyingUrl) {
     return;
   }
 
-  const params = new URLSearchParams();
   const center = map.getCenter();
-  params.set("lng", center.lng.toFixed(6));
-  params.set("lat", center.lat.toFixed(6));
-  params.set("z", map.getZoom().toFixed(3));
+  const z = Math.round(map.getZoom());
+  const decimals = coordinateDecimalsForZoom(z);
+  const datasetName = state.activeDataset ? state.activeDataset.name : "";
+  const locationToken = [
+    center.lat.toFixed(decimals),
+    center.lng.toFixed(decimals),
+    z,
+  ].join(",");
+  const compactToken = `${encodeURIComponent(datasetName)}@${locationToken}`;
 
-  if (state.activeDataset) {
-    params.set("dataset", state.activeDataset.id);
-  } else if (state.activeSearch) {
+  const params = new URLSearchParams();
+  if (state.activeSearch) {
     params.set("q", state.activeSearch);
   }
 
-  const url = `${window.location.pathname}?${params.toString()}`;
+  const suffix = params.toString();
+  const url = `${window.location.pathname}?${compactToken}${suffix ? `&${suffix}` : ""}`;
   if (url === `${window.location.pathname}${window.location.search}`) {
     return;
   }
@@ -576,6 +609,33 @@ function updateUrl(options = {}) {
     window.history.pushState({}, "", url);
   } else {
     window.history.replaceState({}, "", url);
+  }
+}
+
+function coordinateDecimalsForZoom(zoom) {
+  if (zoom <= 3) {
+    return 1;
+  }
+  if (zoom <= 6) {
+    return 2;
+  }
+  if (zoom <= 9) {
+    return 3;
+  }
+  if (zoom <= 12) {
+    return 4;
+  }
+  if (zoom <= 15) {
+    return 5;
+  }
+  return 6;
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch (error) {
+    return value;
   }
 }
 

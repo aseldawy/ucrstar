@@ -31,7 +31,10 @@ By default, the development server listens on `http://127.0.0.1:8000`. Use
 Open `http://127.0.0.1:8000/` for a MapLibre test frontend with dataset search,
 histogram thumbnails, MVT display, feature popups, and download links.
 The frontend keeps the current center, zoom, selected dataset, and search query
-in the URL so links can be copied and reopened into the same view.
+in the URL so links can be copied and reopened into the same view. Browser URLs
+use the dataset name and compact map state, for example
+`/?roads@33.98,-117.33,11&q=highways`. The `q` parameter is included only when
+search results are displayed.
 
 Press `Ctrl+C` in the terminal to stop the server. The command runs without
 Flask's auto-reloader by default so shutdown is a single process. Add `--reload`
