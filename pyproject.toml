@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ucrstar2"
+version = "0.1.0"
+description = "Flask backend for exploring Starlet geospatial datasets."
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0",
+    "starlet",
+    "geopandas",
+    "pyarrow",
+    "shapely",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+ucrstar2 = "ucrstar2.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
