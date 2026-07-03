@@ -1,24 +1,33 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 import starlet
 
+LOGGER = logging.getLogger(__name__)
+
 if __package__:
     from .app import create_app
     from .catalog import DatasetCatalog
+    from .config import load_config
+    from .llm import llm_from_config
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ucrstar2.app import create_app
     from ucrstar2.catalog import DatasetCatalog
+    from ucrstar2.config import load_config
+    from ucrstar2.llm import llm_from_config
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ucrstar2")
     parser.add_argument("--datasets-dir", default="datasets")
     parser.add_argument("--database", default="instance/ucrstar2.sqlite")
+    parser.add_argument("--config", default="ucrstar2.config.json")
+    parser.add_argument("--log-level", default="INFO")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     serve = subparsers.add_parser("serve")
@@ -48,16 +57,27 @@ def main() -> None:
     )
     add_dataset.add_argument("--pmtiles", action="store_true")
 
-    subparsers.add_parser("sync-datasets")
+    delete_dataset = subparsers.add_parser(
+        "delete-dataset",
+        help="Delete a dataset directory and remove it from the catalog.",
+    )
+    delete_dataset.add_argument("dataset")
+    delete_dataset.add_argument(
+        "--missing-ok",
+        action="store_true",
+        help="Do not fail if the dataset is not found.",
+    )
 
     args = parser.parse_args()
-    config = {"DATASETS_DIR": args.datasets_dir, "DATABASE": args.database}
+    configure_logging(args.log_level)
+    project_config = load_config(args.config)
+    config = {
+        "DATASETS_DIR": args.datasets_dir,
+        "DATABASE": args.database,
+        "UCRSTAR2_CONFIG": project_config,
+    }
     catalog = DatasetCatalog(args.database, args.datasets_dir)
 
-    if args.command == "sync-datasets":
-        rows = catalog.sync()
-        print(f"Synced {len(rows)} dataset(s).")
-        return
     if args.command == "add-dataset":
         dataset_name = args.name or Path(args.input_path).stem
         build_kwargs = {
@@ -70,6 +90,8 @@ def main() -> None:
         if args.threshold is not None:
             build_kwargs["threshold"] = args.threshold
 
+        LOGGER.info("Adding dataset '%s' from %s", dataset_name, args.input_path)
+        LOGGER.info("Building Starlet dataset under %s", args.datasets_dir)
         starlet.add_dataset(
             args.input_path,
             args.datasets_dir,
@@ -77,11 +99,42 @@ def main() -> None:
             overwrite=args.overwrite,
             **build_kwargs,
         )
+        LOGGER.info("Starlet build finished for dataset '%s'", dataset_name)
+        LOGGER.info("Syncing catalog metadata")
         catalog.sync()
         dataset = catalog.get(dataset_name)
         if dataset is None:
             raise RuntimeError(f"Dataset was built but not found in catalog: {dataset_name}")
-        print(f"Added dataset {dataset['name']} with ID {dataset['id']}.")
+        llm = llm_from_config(project_config)
+        if llm.enabled:
+            LOGGER.info(
+                "LLM enrichment enabled: provider=%s chat_model=%s embedding_model=%s",
+                llm.provider,
+                llm.chat_model,
+                llm.embedding_model,
+            )
+            dataset = catalog.enrich(dataset["id"], llm) or dataset
+        else:
+            LOGGER.info("LLM enrichment disabled")
+        LOGGER.info("Added dataset %s with ID %s.", dataset["name"], dataset["id"])
+        return
+    if args.command == "delete-dataset":
+        dataset = catalog.get(args.dataset)
+        if dataset is None:
+            if args.missing_ok:
+                LOGGER.info("Dataset '%s' was not found.", args.dataset)
+                return
+            raise SystemExit(f"Dataset not found: {args.dataset}")
+
+        LOGGER.info(
+            "Deleting dataset %s with ID %s from %s",
+            dataset["name"],
+            dataset["id"],
+            args.datasets_dir,
+        )
+        starlet.delete_dataset(args.datasets_dir, dataset["name"], missing_ok=args.missing_ok)
+        catalog.delete(dataset["id"])
+        LOGGER.info("Deleted dataset %s with ID %s.", dataset["name"], dataset["id"])
         return
     if args.command == "serve":
         app = create_app(config)
@@ -91,6 +144,14 @@ def main() -> None:
             debug=args.debug,
             use_reloader=args.reload,
         )
+
+
+def configure_logging(level_name: str) -> None:
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
 
 
 if __name__ == "__main__":

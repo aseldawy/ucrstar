@@ -21,6 +21,8 @@ from flask import (
 )
 
 from .catalog import DatasetCatalog
+from .config import load_config
+from .llm import llm_from_config
 
 
 DEFAULT_BATCH_SIZE = 1000
@@ -32,6 +34,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         DATASETS_DIR=Path("datasets"),
         DATABASE=Path("instance/ucrstar2.sqlite"),
         QUERY_BATCH_SIZE=DEFAULT_BATCH_SIZE,
+        UCRSTAR2_CONFIG=load_config(),
     )
     if config:
         app.config.update(config)
@@ -47,11 +50,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     @app.get("/health.json")
     def health() -> Response:
         return jsonify({"status": "ok"})
-
-    @app.post("/admin/sync-datasets")
-    def sync_datasets() -> Response:
-        rows = catalog().sync()
-        return jsonify({"datasets": rows, "count": len(rows)})
 
     @app.get("/datasets.json")
     def datasets() -> Response:
@@ -69,6 +67,22 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 "max_size",
             }
         }
+        if request.args.get("semantic") == "1" and filters.get("q"):
+            llm = llm_client()
+            llm_config = current_app.config["UCRSTAR2_CONFIG"].get("llm", {})
+            if getattr(llm, "enabled", False) and llm_config.get("semantic_search", True):
+                try:
+                    results = catalog().semantic_search(
+                        filters["q"],
+                        llm,
+                        filters,
+                        limit=int(llm_config.get("search_limit", 20)),
+                    )
+                    if results:
+                        return jsonify({"datasets": results, "search": "semantic"})
+                except Exception:
+                    if not llm_config.get("fallback_on_error", True):
+                        raise
         return jsonify({"datasets": catalog().list(filters)})
 
     @app.get("/datasets/<dataset_ref>.json")
@@ -78,6 +92,14 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         if dataset is None:
             return jsonify({"error": "dataset not found"}), 404
         return jsonify(dataset)
+
+    @app.get("/datasets/<dataset_ref>/style.json")
+    def dataset_style(dataset_ref: str) -> Response:
+        catalog().sync()
+        style = catalog().style(dataset_ref)
+        if style is None:
+            return jsonify({"error": "dataset not found"}), 404
+        return jsonify(style)
 
     @app.get("/datasets/<dataset_ref>/histogram.png")
     def dataset_histogram(dataset_ref: str) -> Response:
@@ -172,6 +194,10 @@ def catalog() -> DatasetCatalog:
         Path(current_app.config["DATABASE"]),
         Path(current_app.config["DATASETS_DIR"]),
     )
+
+
+def llm_client() -> Any:
+    return llm_from_config(current_app.config["UCRSTAR2_CONFIG"])
 
 
 def dataset_path(name: str) -> Path:

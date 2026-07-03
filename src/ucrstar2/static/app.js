@@ -123,7 +123,7 @@ function hideSuggestions() {
 }
 
 async function runSearch(query) {
-  const datasets = await fetchDatasets(query);
+  const datasets = await fetchDatasets(query, { semantic: true });
   panelTitle.textContent = query ? `Results for "${query}"` : "Datasets";
   panelContent.replaceChildren(renderResults(datasets));
   sidePanel.hidden = false;
@@ -162,12 +162,15 @@ async function selectDataset(datasetId) {
   state.activeDataset = dataset;
   searchInput.value = dataset.name;
   hideSuggestions();
-  showDatasetOnMap(dataset);
+  await showDatasetOnMap(dataset);
   renderDatasetDetails(dataset);
 }
 
-function showDatasetOnMap(dataset) {
+async function showDatasetOnMap(dataset) {
   clearDatasetLayer();
+  const style = await fetchDatasetStyle(dataset);
+  const sourceLayer = style.source_layer || SOURCE_LAYER;
+  const layers = style.layers || {};
 
   map.addSource(DATASET_SOURCE, {
     type: "vector",
@@ -182,9 +185,9 @@ function showDatasetOnMap(dataset) {
     id: "dataset-fill",
     type: "fill",
     source: DATASET_SOURCE,
-    "source-layer": SOURCE_LAYER,
+    "source-layer": sourceLayer,
     filter: ["==", ["geometry-type"], "Polygon"],
-    paint: {
+    paint: layers.fill || {
       "fill-color": "#2a9d8f",
       "fill-opacity": 0.25,
     },
@@ -194,8 +197,8 @@ function showDatasetOnMap(dataset) {
     id: "dataset-line",
     type: "line",
     source: DATASET_SOURCE,
-    "source-layer": SOURCE_LAYER,
-    paint: {
+    "source-layer": sourceLayer,
+    paint: layers.line || {
       "line-color": "#0f6b99",
       "line-width": [
         "interpolate",
@@ -214,9 +217,9 @@ function showDatasetOnMap(dataset) {
     id: "dataset-circle",
     type: "circle",
     source: DATASET_SOURCE,
-    "source-layer": SOURCE_LAYER,
+    "source-layer": sourceLayer,
     filter: ["==", ["geometry-type"], "Point"],
-    paint: {
+    paint: layers.circle || {
       "circle-color": "#d1495b",
       "circle-radius": [
         "interpolate",
@@ -240,6 +243,14 @@ function showDatasetOnMap(dataset) {
       ],
       { padding: 80, maxZoom: 12, duration: 600 },
     );
+  }
+}
+
+async function fetchDatasetStyle(dataset) {
+  try {
+    return await fetchJson(`/datasets/${encodeURIComponent(dataset.id)}/style.json`);
+  } catch (error) {
+    return {};
   }
 }
 
@@ -377,10 +388,15 @@ function showFeaturePopup(properties, sampleGeojsonUrl, lngLat) {
     .addTo(map);
 }
 
-async function fetchDatasets(query) {
-  const url = query
-    ? `/datasets.json?q=${encodeURIComponent(query)}`
-    : "/datasets.json";
+async function fetchDatasets(query, options = {}) {
+  const params = new URLSearchParams();
+  if (query) {
+    params.set("q", query);
+  }
+  if (options.semantic) {
+    params.set("semantic", "1");
+  }
+  const url = params.toString() ? `/datasets.json?${params}` : "/datasets.json";
   const payload = await fetchJson(url);
   return payload.datasets || [];
 }

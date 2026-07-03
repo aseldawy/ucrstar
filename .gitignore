@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 .venv
 *.egg-info/
+ucrstar2.config.json
+cemetery.geojson
+models/
 tmp/
 datasets/*
 !datasets/.gitkeep

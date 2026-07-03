@@ -1,0 +1,131 @@
+from pathlib import Path
+
+from ucrstar2 import llm as llm_module
+from ucrstar2.llm import GeminiClient, LLMConfig, llm_from_config, resolve_integrated_model, ssl_context
+
+
+def test_integrated_builtin_enriches_without_external_server() -> None:
+    llm = llm_from_config(
+        {
+            "llm": {
+                "enabled": True,
+                "provider": "integrated",
+                "max_description_chars": 80,
+                "providers": {
+                    "integrated": {
+                        "backend": "builtin",
+                        "model_path": "",
+                        "chat_model": "builtin-heuristic",
+                        "embedding_model": "builtin-hash",
+                        "embedding_dimensions": 16,
+                    }
+                },
+            }
+        }
+    )
+
+    enrichment = llm.enrich_dataset(
+        {
+            "name": "road_centerlines",
+            "num_features": 12,
+            "geometry_types": ["LineString"],
+            "schema": [{"name": "road_name", "type": "text"}],
+        }
+    )
+    embedding = llm.embed("roads and streets")
+
+    assert enrichment["description"]
+    assert len(enrichment["description"]) <= 80
+    assert enrichment["attributes"]["road_name"]
+    assert enrichment["style"]["layers"]["line"]["line-color"]
+    assert len(embedding) == 16
+
+
+def test_integrated_model_resolver_reuses_downloaded_model(tmp_path: Path) -> None:
+    model_path = (
+        tmp_path
+        / "models"
+        / "Qwen__Qwen2.5-0.5B-Instruct-GGUF"
+        / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    )
+    model_path.parent.mkdir(parents=True)
+    model_path.write_bytes(b"model")
+
+    resolved = resolve_integrated_model(
+        {
+            "model_dir": str(tmp_path / "models"),
+            "model_id": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+            "model_file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        }
+    )
+
+    assert resolved == model_path
+
+
+def test_integrated_model_resolver_downloads_missing_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        llm_module,
+        "discover_gguf_file",
+        lambda model_id: "model-q4_k_m.gguf",
+    )
+    monkeypatch.setattr(
+        llm_module,
+        "download_file",
+        lambda url, target_path: target_path.write_bytes(url.encode("utf-8")),
+    )
+
+    resolved = resolve_integrated_model(
+        {
+            "model_dir": str(tmp_path / "models"),
+            "model_id": "org/model",
+        }
+    )
+
+    assert resolved == tmp_path / "models" / "org__model" / "model-q4_k_m.gguf"
+    assert resolved.read_text(encoding="utf-8") == (
+        "https://huggingface.co/org/model/resolve/main/model-q4_k_m.gguf"
+    )
+
+
+def test_provider_http_uses_ssl_context() -> None:
+    context = ssl_context()
+
+    assert context.verify_mode.name == "CERT_REQUIRED"
+
+
+def test_gemini_embedding_uses_current_model_and_header(monkeypatch) -> None:
+    calls = {}
+
+    def fake_post_json(url, body, headers):
+        calls["url"] = url
+        calls["body"] = body
+        calls["headers"] = headers
+        return {"embedding": {"values": [0.1, 0.2]}}
+
+    monkeypatch.setattr("ucrstar2.llm.post_json", fake_post_json)
+    client = GeminiClient(
+        LLMConfig(
+            enabled=True,
+            provider="gemini",
+            max_description_chars=250,
+            semantic_search=True,
+            search_limit=20,
+            fallback_on_error=True,
+            provider_config={
+                "api_key": "secret",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta",
+                "chat_model": "gemini-2.5-flash",
+                "embedding_model": "gemini-embedding-2",
+            },
+        )
+    )
+
+    vector = client.embed("cemetery dataset")
+
+    assert vector == [0.1, 0.2]
+    assert calls["url"].endswith("/models/gemini-embedding-2:embedContent")
+    assert calls["headers"]["x-goog-api-key"] == "secret"
+    assert "title: dataset catalog entry | text:" in calls["body"]["content"]["parts"][0]["text"]
