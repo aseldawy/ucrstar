@@ -25,6 +25,11 @@ def main() -> None:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--debug", action="store_true")
+    serve.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable Flask's auto-reloader. Off by default so Ctrl+C stops one process.",
+    )
 
     add_dataset = subparsers.add_parser(
         "add-dataset",
@@ -80,7 +85,12 @@ def main() -> None:
         return
     if args.command == "serve":
         app = create_app(config)
-        app.run(host=args.host, port=args.port, debug=args.debug)
+        app.run(
+            host=args.host,
+            port=args.port,
+            debug=args.debug,
+            use_reloader=args.reload,
+        )
 
 
 if __name__ == "__main__":

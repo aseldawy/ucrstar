@@ -3,11 +3,22 @@ from __future__ import annotations
 import csv
 import io
 import json
+import struct
+import zlib
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
 import starlet
-from flask import Flask, Response, current_app, jsonify, request, stream_with_context
+from flask import (
+    Flask,
+    Response,
+    current_app,
+    jsonify,
+    request,
+    send_from_directory,
+    stream_with_context,
+)
 
 from .catalog import DatasetCatalog
 
@@ -24,6 +35,10 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     )
     if config:
         app.config.update(config)
+
+    @app.get("/")
+    def index() -> Response:
+        return send_from_directory(app.static_folder, "index.html")
 
     @app.errorhandler(ValueError)
     def bad_request(error: ValueError) -> tuple[Response, int]:
@@ -63,6 +78,28 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         if dataset is None:
             return jsonify({"error": "dataset not found"}), 404
         return jsonify(dataset)
+
+    @app.get("/datasets/<dataset_ref>/histogram.png")
+    def dataset_histogram(dataset_ref: str) -> Response:
+        catalog().sync()
+        dataset = require_dataset(dataset_ref)
+        if isinstance(dataset, Response):
+            return dataset
+
+        size = int(request.args.get("size", "256"))
+        if size < 32 or size > 1024:
+            return jsonify({"error": "size must be between 32 and 1024"}), 400
+
+        histogram_path = dataset_path(dataset["name"]) / "histograms" / "global.npy"
+        if not histogram_path.exists():
+            return jsonify({"error": "histogram not found"}), 404
+
+        png = histogram_png(histogram_path, size)
+        return Response(
+            png,
+            mimetype="image/png",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
 
     @app.route("/datasets/<dataset_ref>/download.<fmt>", methods=["GET", "POST"])
     def download(dataset_ref: str, fmt: str) -> Response:
@@ -236,3 +273,62 @@ def normalize_json(value: Any) -> Any:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
+
+
+def histogram_png(histogram_path: Path, size: int = 256) -> bytes:
+    data = np.load(histogram_path, mmap_mode="r")
+    if data.ndim != 2:
+        raise ValueError("histogram array must be two-dimensional")
+
+    sampled = downsample_grid(data, size)
+    scaled = scale_grayscale(sampled)
+    return encode_png_grayscale(scaled)
+
+
+def downsample_grid(data: np.ndarray, size: int) -> np.ndarray:
+    height, width = data.shape
+    y_edges = np.linspace(0, height, size + 1, dtype=int)
+    x_edges = np.linspace(0, width, size + 1, dtype=int)
+    output = np.zeros((size, size), dtype=np.float64)
+
+    for y in range(size):
+        y0, y1 = y_edges[y], y_edges[y + 1]
+        if y1 <= y0:
+            y1 = min(height, y0 + 1)
+        for x in range(size):
+            x0, x1 = x_edges[x], x_edges[x + 1]
+            if x1 <= x0:
+                x1 = min(width, x0 + 1)
+            output[y, x] = float(np.sum(data[y0:y1, x0:x1]))
+    return output
+
+
+def scale_grayscale(data: np.ndarray) -> np.ndarray:
+    finite = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+    transformed = np.log1p(np.maximum(finite, 0.0))
+    max_value = float(np.max(transformed))
+    if max_value <= 0:
+        return np.full(transformed.shape, 245, dtype=np.uint8)
+    normalized = transformed / max_value
+    return (255 - np.round(normalized * 255)).astype(np.uint8)
+
+
+def encode_png_grayscale(pixels: np.ndarray) -> bytes:
+    if pixels.dtype != np.uint8 or pixels.ndim != 2:
+        raise ValueError("pixels must be a two-dimensional uint8 array")
+
+    height, width = pixels.shape
+    raw = b"".join(b"\x00" + pixels[y].tobytes() for y in range(height))
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        checksum = zlib.crc32(kind)
+        checksum = zlib.crc32(payload, checksum) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )

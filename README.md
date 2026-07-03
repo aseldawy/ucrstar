@@ -28,6 +28,13 @@ separate database setup command is required.
 By default, the development server listens on `http://127.0.0.1:8000`. Use
 `--port` to pick a different port.
 
+Open `http://127.0.0.1:8000/` for a MapLibre test frontend with dataset search,
+histogram thumbnails, MVT display, feature popups, and download links.
+
+Press `Ctrl+C` in the terminal to stop the server. The command runs without
+Flask's auto-reloader by default so shutdown is a single process. Add `--reload`
+only if you want automatic restarts while editing code.
+
 ## Add Datasets
 
 ```bash
@@ -51,6 +58,7 @@ If you later install the project in editable mode, the module form also works:
 - `GET /datasets.json`
 - `GET /datasets.json?name=roads&geometry_type=Polygon&min_size=1000`
 - `GET /datasets/<ID>.json`
+- `GET /datasets/<ID>/histogram.png?size=256`
 - `GET /datasets/<ID>/download.geojson?MBR=x1,y1,x2,y2`
 - `GET /datasets/<ID>/download.csv?MBR=x1,y1,x2,y2`
 - `POST /datasets/<ID>/download.geojson` with a GeoJSON geometry body

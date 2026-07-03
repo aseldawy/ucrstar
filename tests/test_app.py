@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import numpy as np
+
 from ucrstar2.app import create_app
 
 
@@ -95,3 +97,119 @@ def test_dataset_tiles_endpoint_uses_nested_dataset_url(
     assert response.status_code == 200
     assert response.data == b"tile"
     assert response.mimetype == "application/vnd.mapbox-vector-tile"
+
+
+def test_frontend_index_is_served(tmp_path: Path) -> None:
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": tmp_path / "datasets",
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+        }
+    )
+
+    response = app.test_client().get("/")
+
+    assert response.status_code == 200
+    assert b"maplibre-gl" in response.data
+    assert b"/static/app.js" in response.data
+
+
+def test_histogram_png_endpoint(tmp_path: Path, monkeypatch) -> None:
+    datasets_dir = tmp_path / "datasets"
+    histogram_dir = datasets_dir / "counties" / "histograms"
+    histogram_dir.mkdir(parents=True)
+    np.save(histogram_dir / "global.npy", np.arange(64, dtype=np.float64).reshape(8, 8))
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["counties"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "name": "counties",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 100,
+            "bbox": [-1, -2, 3, 4],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "description": "County boundaries",
+            "geometry": [{"geom_types": {"Polygon": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+        }
+    )
+    client = app.test_client()
+    dataset = client.get("/datasets.json").get_json()["datasets"][0]
+
+    response = client.get(f"/datasets/{dataset['id']}/histogram.png?size=64")
+
+    assert response.status_code == 200
+    assert response.mimetype == "image/png"
+    assert response.data.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_sample_geojson_returns_clean_feature(tmp_path: Path, monkeypatch) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "counties").mkdir(parents=True)
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["counties"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "name": "counties",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 100,
+            "bbox": [-1, -2, 3, 4],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "description": "County boundaries",
+            "geometry": [{"geom_types": {"Polygon": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_sample_record",
+        lambda dataset, geometry: {
+            "name": "Riverside",
+            "geoid": "06065",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [-117.4, 33.9],
+            },
+        },
+    )
+
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+        }
+    )
+    client = app.test_client()
+    dataset = client.get("/datasets.json").get_json()["datasets"][0]
+
+    response = client.get(f"/datasets/{dataset['id']}/sample.geojson?MBR=-118,33,-117,34")
+
+    assert response.status_code == 200
+    feature = response.get_json()
+    assert set(feature) == {"type", "geometry", "properties"}
+    assert feature["type"] == "Feature"
+    assert feature["geometry"] == {"type": "Point", "coordinates": [-117.4, 33.9]}
+    assert feature["properties"] == {"name": "Riverside", "geoid": "06065"}
