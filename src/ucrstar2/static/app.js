@@ -5,6 +5,9 @@ const FORMATS = ["geojson", "csv", "parquet", "zip"];
 
 const state = {
   activeDataset: null,
+  activeSearch: "",
+  isApplyingUrl: false,
+  skipNextMapUrlUpdate: false,
   suggestionsTimer: null,
 };
 
@@ -58,7 +61,7 @@ searchInput.addEventListener("keydown", (event) => {
 searchForm.addEventListener("submit", (event) => {
   event.preventDefault();
   hideSuggestions();
-  runSearch(searchInput.value.trim());
+  runSearch(searchInput.value.trim(), { history: "push" });
 });
 
 closePanel.addEventListener("click", () => {
@@ -80,6 +83,20 @@ map.on("moveend", () => {
   if (state.activeDataset) {
     updateDownloadLinks(state.activeDataset);
   }
+  if (state.skipNextMapUrlUpdate) {
+    state.skipNextMapUrlUpdate = false;
+    return;
+  }
+  updateUrl({ history: "replace" });
+});
+
+window.addEventListener("popstate", () => {
+  applyUrlState();
+});
+
+map.once("load", async () => {
+  await applyUrlState();
+  updateUrl({ history: "replace" });
 });
 
 async function loadSuggestions() {
@@ -110,7 +127,7 @@ function renderSuggestions(datasets) {
     button.addEventListener("click", () => {
       hideSuggestions();
       searchInput.value = dataset.name;
-      selectDataset(dataset.id);
+      selectDataset(dataset.id, { history: "push" });
     });
     return button;
   }));
@@ -122,11 +139,16 @@ function hideSuggestions() {
   suggestions.replaceChildren();
 }
 
-async function runSearch(query) {
+async function runSearch(query, options = {}) {
+  state.activeSearch = query;
+  state.activeDataset = null;
+  clearDatasetLayer();
   const datasets = await fetchDatasets(query, { semantic: true });
   panelTitle.textContent = query ? `Results for "${query}"` : "Datasets";
   panelContent.replaceChildren(renderResults(datasets));
   sidePanel.hidden = false;
+  searchInput.value = query;
+  updateUrl({ history: options.history || "replace" });
 }
 
 function renderResults(datasets) {
@@ -151,22 +173,24 @@ function renderResults(datasets) {
         <span class="result-meta">${renderPills(dataset)}</span>
       </span>
     `;
-    button.addEventListener("click", () => selectDataset(dataset.id));
+    button.addEventListener("click", () => selectDataset(dataset.id, { history: "push" }));
     container.append(button);
   }
   return container;
 }
 
-async function selectDataset(datasetId) {
+async function selectDataset(datasetId, options = {}) {
   const dataset = await fetchJson(`/datasets/${encodeURIComponent(datasetId)}.json`);
   state.activeDataset = dataset;
+  state.activeSearch = "";
   searchInput.value = dataset.name;
   hideSuggestions();
   await showDatasetOnMap(dataset);
   renderDatasetDetails(dataset);
+  updateUrl({ history: options.history || "replace" });
 }
 
-async function showDatasetOnMap(dataset) {
+async function showDatasetOnMap(dataset, options = {}) {
   clearDatasetLayer();
   const style = await fetchDatasetStyle(dataset);
   const sourceLayer = style.source_layer || SOURCE_LAYER;
@@ -236,6 +260,9 @@ async function showDatasetOnMap(dataset) {
   });
 
   if (Array.isArray(dataset.mbr) && dataset.mbr.length === 4) {
+    if (options.fitBounds === false) {
+      return;
+    }
     map.fitBounds(
       [
         [dataset.mbr[0], dataset.mbr[1]],
@@ -399,6 +426,95 @@ async function fetchDatasets(query, options = {}) {
   const url = params.toString() ? `/datasets.json?${params}` : "/datasets.json";
   const payload = await fetchJson(url);
   return payload.datasets || [];
+}
+
+async function applyUrlState() {
+  state.isApplyingUrl = true;
+  try {
+    const urlState = readUrlState();
+    applyMapUrlState(urlState);
+
+    if (urlState.dataset) {
+      const dataset = await fetchJson(`/datasets/${encodeURIComponent(urlState.dataset)}.json`);
+      state.activeDataset = dataset;
+      state.activeSearch = "";
+      searchInput.value = dataset.name;
+      hideSuggestions();
+      await showDatasetOnMap(dataset, { fitBounds: false });
+      renderDatasetDetails(dataset);
+    } else if (urlState.q) {
+      await runSearch(urlState.q, { history: "replace" });
+    } else {
+      state.activeDataset = null;
+      state.activeSearch = "";
+      clearDatasetLayer();
+      searchInput.value = "";
+      hideSuggestions();
+      sidePanel.hidden = true;
+    }
+  } finally {
+    state.isApplyingUrl = false;
+  }
+}
+
+function applyMapUrlState(urlState) {
+  if (urlState.lng == null || urlState.lat == null || urlState.z == null) {
+    updateUrl({ history: "replace" });
+    return;
+  }
+  state.skipNextMapUrlUpdate = true;
+  map.jumpTo({
+    center: [urlState.lng, urlState.lat],
+    zoom: urlState.z,
+  });
+}
+
+function readUrlState() {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    lng: parseNumberParam(params.get("lng")),
+    lat: parseNumberParam(params.get("lat")),
+    z: parseNumberParam(params.get("z")),
+    dataset: params.get("dataset") || "",
+    q: params.get("q") || "",
+  };
+}
+
+function updateUrl(options = {}) {
+  if (state.isApplyingUrl) {
+    return;
+  }
+
+  const params = new URLSearchParams();
+  const center = map.getCenter();
+  params.set("lng", center.lng.toFixed(6));
+  params.set("lat", center.lat.toFixed(6));
+  params.set("z", map.getZoom().toFixed(3));
+
+  if (state.activeDataset) {
+    params.set("dataset", state.activeDataset.id);
+  } else if (state.activeSearch) {
+    params.set("q", state.activeSearch);
+  }
+
+  const url = `${window.location.pathname}?${params.toString()}`;
+  if (url === `${window.location.pathname}${window.location.search}`) {
+    return;
+  }
+
+  if (options.history === "push") {
+    window.history.pushState({}, "", url);
+  } else {
+    window.history.replaceState({}, "", url);
+  }
+}
+
+function parseNumberParam(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 async function fetchJson(url) {
