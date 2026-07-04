@@ -63,6 +63,32 @@ def prepare_input_source(value: str) -> PreparedSource:
     return prepare_local_source(value)
 
 
+def source_reference(value: str) -> dict[str, Any]:
+    if is_url(value):
+        return remote_source_reference(value)
+    return prepare_local_source(value).source
+
+
+def remote_source_reference(url: str) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    headers = head_url(url)
+    filename = filename_from_url_or_headers(url, headers)
+    return {
+        "type": "remote_file",
+        "url": url,
+        "accessed_at": utc_now_iso(),
+        "modified_at": timestamp_from_http(headers.get("Last-Modified")),
+        "metadata": {
+            "url": url,
+            "path": parsed.path,
+            "netloc": parsed.netloc,
+            "filename": filename,
+            "content_type": headers.get("Content-Type"),
+            "content_length": headers.get("Content-Length"),
+        },
+    }
+
+
 def prepare_local_source(value: str) -> PreparedSource:
     path = Path(value)
     stat = path.stat()
@@ -217,6 +243,14 @@ def current_source_state(source: dict[str, Any]) -> dict[str, Any]:
 
     if source_type == "local" and url:
         return prepare_local_source(url).source
+
+    if source_type == "remote_file" and url:
+        current = remote_source_reference(url)
+        current["metadata"] = {
+            **metadata,
+            **current.get("metadata", {}),
+        }
+        return current
 
     item_id = metadata.get("item_id")
     if item_id:

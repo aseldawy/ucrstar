@@ -6,8 +6,7 @@ import logging
 import shutil
 import sys
 import uuid
-import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,14 +19,14 @@ if __package__:
     from .catalog import DatasetCatalog
     from .config import load_config
     from .llm import llm_from_config
-    from .sources import current_source_state, prepare_input_source
+    from .sources import current_source_state, source_reference, prepare_input_source
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ucrstar2.app import create_app
     from ucrstar2.catalog import DatasetCatalog
     from ucrstar2.config import load_config
     from ucrstar2.llm import llm_from_config
-    from ucrstar2.sources import current_source_state, prepare_input_source
+    from ucrstar2.sources import current_source_state, source_reference, prepare_input_source
 
 
 def main() -> None:
@@ -103,13 +102,13 @@ def main() -> None:
         "refresh",
         help="Refresh source-backed datasets when their source has been modified.",
     )
-    refresh.add_argument(
-        "dataset",
-        nargs="?",
-        help="Dataset ID or name. If omitted, check all datasets with source information.",
+    add_refresh_arguments(refresh)
+
+    refresh_datasets_parser = subparsers.add_parser(
+        "refresh-datasets",
+        help="Refresh source-backed datasets when their source has been modified.",
     )
-    refresh.add_argument("--force", action="store_true", help="Refresh even if timestamps match.")
-    add_build_arguments(refresh)
+    add_refresh_arguments(refresh_datasets_parser)
 
     args = parser.parse_args()
     configure_logging(args.log_level)
@@ -166,7 +165,7 @@ def main() -> None:
         catalog.delete(dataset["id"])
         LOGGER.info("Deleted dataset %s with ID %s.", dataset["name"], dataset["id"])
         return
-    if args.command == "refresh":
+    if args.command in {"refresh", "refresh-datasets"}:
         refreshed = refresh_datasets(
             catalog,
             args.datasets_dir,
@@ -199,6 +198,16 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--pmtiles", action="store_true")
 
 
+def add_refresh_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "dataset",
+        nargs="?",
+        help="Dataset ID or name. If omitted, check all datasets with source information.",
+    )
+    parser.add_argument("--force", action="store_true", help="Refresh even if timestamps match.")
+    add_build_arguments(parser)
+
+
 def build_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
     build_kwargs = {
         "zoom": args.zoom,
@@ -224,7 +233,7 @@ def add_dataset_from_source(
 ) -> dict[str, Any]:
     if create_only:
         source = registration_source(input_path_or_url)
-        dataset_name = dataset_name or dataset_name_from_source(source, source_name_path(input_path_or_url))
+        dataset_name = dataset_name or dataset_name_from_source(source, source_name_path(input_path_or_url, source))
         dataset = catalog.register_source(
             dataset_name,
             source,
@@ -235,7 +244,7 @@ def add_dataset_from_source(
         return dataset
 
     source = registration_source(input_path_or_url)
-    dataset_name = dataset_name or dataset_name_from_source(source, source_name_path(input_path_or_url))
+    dataset_name = dataset_name or dataset_name_from_source(source, source_name_path(input_path_or_url, source))
     dataset = catalog.register_source(
         dataset_name,
         source,
@@ -250,38 +259,13 @@ def add_dataset_from_source(
 
 
 def registration_source(input_path_or_url: str) -> dict[str, Any]:
-    accessed_at = datetime.now(timezone.utc).isoformat()
-    parsed = urllib.parse.urlparse(input_path_or_url)
-    if parsed.scheme in {"http", "https"}:
-        return {
-            "type": "remote",
-            "url": input_path_or_url,
-            "accessed_at": accessed_at,
-            "modified_at": None,
-            "metadata": {
-                "url": input_path_or_url,
-                "path": parsed.path,
-            },
-        }
-
-    path = Path(input_path_or_url)
-    stat = path.stat()
-    return {
-        "type": "local",
-        "url": str(path.expanduser().resolve()),
-        "accessed_at": accessed_at,
-        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-        "metadata": {
-            "path": str(path.expanduser().resolve()),
-            "size_bytes": stat.st_size,
-        },
-    }
+    return source_reference(input_path_or_url)
 
 
-def source_name_path(input_path_or_url: str) -> Path:
-    parsed = urllib.parse.urlparse(input_path_or_url)
-    if parsed.scheme in {"http", "https"}:
-        name = Path(parsed.path).name or parsed.netloc or "dataset"
+def source_name_path(input_path_or_url: str, source: dict[str, Any]) -> Path:
+    if source["type"] != "local":
+        metadata = source.get("metadata") or {}
+        name = metadata.get("filename") or metadata.get("path") or metadata.get("netloc") or "dataset"
         return Path(name)
     return Path(input_path_or_url)
 

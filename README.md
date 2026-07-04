@@ -47,11 +47,14 @@ CLI commands log progress to the console at `INFO` level by default. Use
 
 ```bash
 .venv/bin/python src/ucrstar2/cli.py add-dataset path/to/source.geojson --name roads
+.venv/bin/python src/ucrstar2/cli.py add-dataset https://example.com/data/roads.geojson --name roads
 .venv/bin/python src/ucrstar2/cli.py add-dataset path/to/source.geojson --name roads --create-only
 ```
 
 The input can be a local path, a direct public download URL, an ArcGIS item URL,
-an Esri Hub dataset URL, or a public ArcGIS FeatureServer layer URL:
+an Esri Hub dataset URL, or a public ArcGIS FeatureServer layer URL. Local paths
+are processed directly. Direct public URLs are downloaded to a temporary
+directory and then passed to Starlet:
 
 ```bash
 .venv/bin/python src/ucrstar2/cli.py add-dataset \
@@ -108,6 +111,7 @@ If LLM support is enabled, `add-dataset` also enriches the catalog entry:
 
 ```bash
 .venv/bin/python src/ucrstar2/cli.py refresh
+.venv/bin/python src/ucrstar2/cli.py refresh-datasets
 .venv/bin/python src/ucrstar2/cli.py refresh roads
 .venv/bin/python src/ucrstar2/cli.py refresh roads --force
 ```
@@ -119,10 +123,10 @@ ArcGIS item or layer modification metadata when available. For direct remote
 files, this uses the HTTP `Last-Modified` header when available.
 
 Refresh builds the replacement under a temporary dataset name first. If the
-build succeeds, it swaps the new dataset directory into place and updates the
-catalog source metadata. If the build fails, the existing dataset is left in
-place. Use `--force` to rebuild even when the timestamp does not show a newer
-source.
+build succeeds, it swaps the new dataset directory into place while preserving
+the existing dataset ID and name, then updates the catalog source metadata. If
+the build fails, the existing dataset is left in place. Use `--force` to rebuild
+even when the timestamp does not show a newer source.
 
 ## Delete Datasets
 

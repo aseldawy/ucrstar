@@ -3,6 +3,27 @@ from pathlib import Path
 from ucrstar2 import sources
 
 
+def test_source_reference_for_remote_file_uses_http_timestamp(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sources,
+        "head_url",
+        lambda url: {
+            "Last-Modified": "Tue, 30 Jun 2026 06:24:35 GMT",
+            "Content-Type": "application/geo+json",
+            "Content-Length": "42",
+        },
+    )
+
+    source = sources.source_reference("https://example.com/data/roads.geojson")
+
+    assert source["type"] == "remote_file"
+    assert source["url"] == "https://example.com/data/roads.geojson"
+    assert source["modified_at"] == "2026-06-30T06:24:35+00:00"
+    assert source["metadata"]["filename"] == "roads.geojson"
+    assert source["metadata"]["content_type"] == "application/geo+json"
+    assert source["metadata"]["content_length"] == "42"
+
+
 def test_hub_dataset_item_url_downloads_arcgis_item_data(monkeypatch) -> None:
     url = "https://egis-lacounty.hub.arcgis.com/datasets/cdd4c011519849caa62286044f1d31c9/about"
     calls = {}
