@@ -6,7 +6,8 @@ import logging
 import shutil
 import sys
 import uuid
-from datetime import datetime
+import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,11 @@ def main() -> None:
     add_dataset.add_argument("input_path")
     add_dataset.add_argument("--name")
     add_dataset.add_argument("--overwrite", action="store_true")
+    add_dataset.add_argument(
+        "--create-only",
+        action="store_true",
+        help="Only register the dataset source in the database; do not build or publish it.",
+    )
     add_dataset.add_argument("--zoom", type=int, default=7)
     add_dataset.add_argument("--partition-size", type=int)
     add_dataset.add_argument("--threshold", type=int)
@@ -63,6 +69,24 @@ def main() -> None:
         help="Do not write per-row bounding boxes for faster spatial pruning.",
     )
     add_dataset.add_argument("--pmtiles", action="store_true")
+
+    process_dataset = subparsers.add_parser(
+        "process-dataset",
+        help="Process registered datasets through Starlet, enrichment, and publishing.",
+    )
+    process_dataset.add_argument(
+        "dataset",
+        nargs="?",
+        help="Dataset ID or name. If omitted, process queued datasets one at a time.",
+    )
+    process_dataset.add_argument("--limit", type=int, help="Maximum number of queued datasets to process.")
+    process_dataset.add_argument(
+        "--state",
+        choices=["created", "downloaded", "processed", "ready", "error"],
+        help="Queued state to process when no dataset is specified.",
+    )
+    process_dataset.add_argument("--overwrite", action="store_true")
+    add_build_arguments(process_dataset)
 
     delete_dataset = subparsers.add_parser(
         "delete-dataset",
@@ -105,10 +129,24 @@ def main() -> None:
             args.name,
             args.datasets_dir,
             args.overwrite,
+            args.create_only,
             build_kwargs_from_args(args),
             project_config,
         )
         LOGGER.info("Added dataset %s with ID %s.", dataset["name"], dataset["id"])
+        return
+    if args.command == "process-dataset":
+        processed = process_datasets(
+            catalog,
+            args.datasets_dir,
+            args.dataset,
+            args.limit,
+            args.state,
+            args.overwrite,
+            build_kwargs_from_args(args),
+            project_config,
+        )
+        LOGGER.info("Processing complete. Processed %d dataset(s).", processed)
         return
     if args.command == "delete-dataset":
         dataset = catalog.get(args.dataset)
@@ -180,16 +218,154 @@ def add_dataset_from_source(
     dataset_name: str | None,
     datasets_dir: str | Path,
     overwrite: bool,
+    create_only: bool,
     build_kwargs: dict[str, Any],
     project_config: dict[str, Any],
 ) -> dict[str, Any]:
-    with prepare_input_source(input_path_or_url) as prepared:
-        dataset_name = dataset_name or dataset_name_from_source(prepared.source, prepared.path)
-        LOGGER.info("Prepared source %s", prepared.source["url"])
-        build_dataset(prepared.path, datasets_dir, dataset_name, overwrite, build_kwargs)
-        write_source_summary(Path(datasets_dir) / dataset_name, prepared.source)
-        dataset = sync_source_and_enrich(catalog, dataset_name, prepared.source, project_config)
-    return dataset
+    if create_only:
+        source = registration_source(input_path_or_url)
+        dataset_name = dataset_name or dataset_name_from_source(source, source_name_path(input_path_or_url))
+        dataset = catalog.register_source(
+            dataset_name,
+            source,
+            description=(source.get("metadata") or {}).get("description"),
+            overwrite=overwrite,
+        )
+        LOGGER.info("Registered dataset '%s' in created state", dataset["name"])
+        return dataset
+
+    source = registration_source(input_path_or_url)
+    dataset_name = dataset_name or dataset_name_from_source(source, source_name_path(input_path_or_url))
+    dataset = catalog.register_source(
+        dataset_name,
+        source,
+        description=(source.get("metadata") or {}).get("description"),
+        overwrite=overwrite,
+    )
+    try:
+        return process_registered_dataset(catalog, dataset, datasets_dir, overwrite, build_kwargs, project_config)
+    except Exception as exc:
+        catalog.update_state(dataset["id"], "error", error_message=str(exc))
+        raise
+
+
+def registration_source(input_path_or_url: str) -> dict[str, Any]:
+    accessed_at = datetime.now(timezone.utc).isoformat()
+    parsed = urllib.parse.urlparse(input_path_or_url)
+    if parsed.scheme in {"http", "https"}:
+        return {
+            "type": "remote",
+            "url": input_path_or_url,
+            "accessed_at": accessed_at,
+            "modified_at": None,
+            "metadata": {
+                "url": input_path_or_url,
+                "path": parsed.path,
+            },
+        }
+
+    path = Path(input_path_or_url)
+    stat = path.stat()
+    return {
+        "type": "local",
+        "url": str(path.expanduser().resolve()),
+        "accessed_at": accessed_at,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        "metadata": {
+            "path": str(path.expanduser().resolve()),
+            "size_bytes": stat.st_size,
+        },
+    }
+
+
+def source_name_path(input_path_or_url: str) -> Path:
+    parsed = urllib.parse.urlparse(input_path_or_url)
+    if parsed.scheme in {"http", "https"}:
+        name = Path(parsed.path).name or parsed.netloc or "dataset"
+        return Path(name)
+    return Path(input_path_or_url)
+
+
+def process_datasets(
+    catalog: DatasetCatalog,
+    datasets_dir: str | Path,
+    dataset_ref: str | None,
+    limit: int | None,
+    state: str | None,
+    overwrite: bool,
+    build_kwargs: dict[str, Any],
+    project_config: dict[str, Any],
+) -> int:
+    catalog.sync()
+    if dataset_ref:
+        dataset = catalog.get(dataset_ref)
+        if dataset is None:
+            raise SystemExit(f"Dataset not found: {dataset_ref}")
+        datasets = [dataset]
+    else:
+        datasets = catalog.processable(state=state, limit=limit)
+
+    processed = 0
+    for dataset in datasets:
+        try:
+            process_registered_dataset(
+                catalog,
+                dataset,
+                datasets_dir,
+                overwrite,
+                build_kwargs,
+                project_config,
+            )
+            processed += 1
+        except Exception as exc:
+            catalog.update_state(dataset["id"], "error", error_message=str(exc))
+            LOGGER.exception("Processing failed for dataset '%s'", dataset["name"])
+            if dataset_ref:
+                raise
+    return processed
+
+
+def process_registered_dataset(
+    catalog: DatasetCatalog,
+    dataset: dict[str, Any],
+    datasets_dir: str | Path,
+    overwrite: bool,
+    build_kwargs: dict[str, Any],
+    project_config: dict[str, Any],
+) -> dict[str, Any]:
+    source = dataset.get("source") or {}
+    source_url = source.get("url")
+    if not source_url:
+        raise ValueError(f"Dataset has no source URL: {dataset['name']}")
+
+    LOGGER.info("Processing dataset '%s' from %s", dataset["name"], source_url)
+    with prepare_input_source(source_url) as prepared:
+        if prepared.source.get("type") != "local":
+            catalog.update_state(dataset["id"], "downloaded")
+        build_dataset(prepared.path, datasets_dir, dataset["name"], overwrite, build_kwargs)
+        write_source_summary(Path(datasets_dir) / dataset["name"], prepared.source)
+        catalog.sync()
+        processed = catalog.get(dataset["name"])
+        if processed is None:
+            raise RuntimeError(f"Dataset was built but not found in catalog: {dataset['name']}")
+        processed = catalog.update_source(processed["id"], prepared.source) or processed
+        processed = catalog.update_state(processed["id"], "processed") or processed
+
+        llm = llm_from_config(project_config)
+        if llm.enabled:
+            LOGGER.info(
+                "LLM enrichment enabled: provider=%s chat_model=%s embedding_model=%s",
+                llm.provider,
+                llm.chat_model,
+                llm.embedding_model,
+            )
+            processed = catalog.enrich(processed["id"], llm) or processed
+        else:
+            LOGGER.info("LLM enrichment disabled")
+        processed = catalog.update_state(processed["id"], "ready") or processed
+        processed = catalog.update_state(processed["id"], "published") or processed
+        LOGGER.info("Published dataset %s with ID %s.", processed["name"], processed["id"])
+        return processed
 
 
 def build_dataset(

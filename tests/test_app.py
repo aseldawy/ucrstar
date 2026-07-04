@@ -47,6 +47,41 @@ def test_datasets_endpoint_uses_catalog(tmp_path: Path, monkeypatch) -> None:
     body = response.get_json()
     assert body["datasets"][0]["name"] == "counties"
     assert body["datasets"][0]["geometry_types"] == ["Polygon"]
+    assert body["datasets"][0]["dataset_state"] == "published"
+
+
+def test_datasets_endpoint_defaults_to_published_state(tmp_path: Path) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "test.sqlite"
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": db_path,
+        }
+    )
+    catalog = app.config["DATABASE"]
+    from ucrstar2.catalog import DatasetCatalog
+
+    DatasetCatalog(catalog, datasets_dir).register_source(
+        "queued",
+        {
+            "type": "local",
+            "url": str(tmp_path / "queued.geojson"),
+            "accessed_at": "2026-01-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {},
+        },
+        overwrite=True,
+    )
+
+    client = app.test_client()
+    default_body = client.get("/datasets.json").get_json()
+    created_body = client.get("/datasets.json?state=created").get_json()
+
+    assert default_body["datasets"] == []
+    assert created_body["datasets"][0]["name"] == "queued"
+    assert created_body["datasets"][0]["dataset_state"] == "created"
 
 
 def test_dataset_tiles_endpoint_uses_nested_dataset_url(

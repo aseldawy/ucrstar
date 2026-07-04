@@ -15,6 +15,9 @@ from .llm import fallback_style
 
 LOGGER = logging.getLogger(__name__)
 
+DATASET_STATES = {"created", "downloaded", "processed", "ready", "published", "error"}
+PROCESSABLE_STATES = {"created", "downloaded", "processed", "ready", "error"}
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS datasets (
@@ -36,6 +39,8 @@ CREATE TABLE IF NOT EXISTS datasets (
     source_accessed_at TEXT,
     source_modified_at TEXT,
     source_metadata_json TEXT,
+    dataset_state TEXT NOT NULL DEFAULT 'published',
+    error_message TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     summary_json TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -69,6 +74,8 @@ LIST_COLUMNS = [
     "num_coordinates",
     "geometry_types",
     "mbr",
+    "dataset_state",
+    "error_message",
 ]
 
 
@@ -96,6 +103,8 @@ class DatasetCatalog:
             ensure_column(conn, "datasets", "source_accessed_at", "TEXT")
             ensure_column(conn, "datasets", "source_modified_at", "TEXT")
             ensure_column(conn, "datasets", "source_metadata_json", "TEXT")
+            ensure_column(conn, "datasets", "dataset_state", "TEXT NOT NULL DEFAULT 'published'")
+            ensure_column(conn, "datasets", "error_message", "TEXT")
 
     def sync(self) -> list[dict[str, Any]]:
         self.init_db()
@@ -141,6 +150,13 @@ class DatasetCatalog:
         if geometry_type:
             clauses.append("geometry_types LIKE ?")
             values.append(f"%{geometry_type}%")
+
+        state = filters.get("state")
+        if state and state != "all":
+            if state not in DATASET_STATES:
+                raise ValueError(f"Unsupported dataset state: {state}")
+            clauses.append("dataset_state = ?")
+            values.append(state)
 
         for param, op in (("min_size", ">="), ("max_size", "<=")):
             if filters.get(param):
@@ -244,6 +260,128 @@ class DatasetCatalog:
                 ),
             )
         return self.get(dataset["id"])
+
+    def register_source(
+        self,
+        name: str,
+        source: dict[str, Any],
+        *,
+        description: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        self.init_db()
+        existing = self.get(name)
+        if existing is not None and not overwrite:
+            raise ValueError(f"Dataset already exists: {name}")
+
+        if existing is not None:
+            dataset_id = existing["id"]
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE datasets
+                    SET description = ?,
+                        size_bytes = 0,
+                        num_features = NULL,
+                        num_coordinates = NULL,
+                        geometry_types = '[]',
+                        mbr = NULL,
+                        schema_json = NULL,
+                        citation_json = NULL,
+                        visualization_type = NULL,
+                        visualization_url = NULL,
+                        style_json = NULL,
+                        source_type = ?,
+                        source_url = ?,
+                        source_accessed_at = ?,
+                        source_modified_at = ?,
+                        source_metadata_json = ?,
+                        dataset_state = 'created',
+                        error_message = NULL,
+                        metadata_json = '{}',
+                        summary_json = '{}',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (
+                        description,
+                        source.get("type"),
+                        source.get("url"),
+                        source.get("accessed_at"),
+                        source.get("modified_at"),
+                        json.dumps(source.get("metadata") or {}),
+                        dataset_id,
+                    ),
+                )
+            return self.get(dataset_id) or existing
+
+        dataset_id = str(uuid.uuid4())
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO datasets (
+                    id, name, description, size_bytes, geometry_types,
+                    source_type, source_url, source_accessed_at,
+                    source_modified_at, source_metadata_json,
+                    dataset_state, error_message, metadata_json, summary_json
+                )
+                VALUES (?, ?, ?, 0, '[]', ?, ?, ?, ?, ?, 'created', NULL, '{}', '{}')
+                """,
+                (
+                    dataset_id,
+                    name,
+                    description,
+                    source.get("type"),
+                    source.get("url"),
+                    source.get("accessed_at"),
+                    source.get("modified_at"),
+                    json.dumps(source.get("metadata") or {}),
+                ),
+            )
+        return self.get(dataset_id) or {}
+
+    def update_state(
+        self,
+        dataset_id_or_name: str,
+        state: str,
+        *,
+        error_message: str | None = None,
+    ) -> dict[str, Any] | None:
+        if state not in DATASET_STATES:
+            raise ValueError(f"Unsupported dataset state: {state}")
+        dataset = self.get(dataset_id_or_name)
+        if dataset is None:
+            return None
+        self.init_db()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE datasets
+                SET dataset_state = ?,
+                    error_message = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (state, error_message, dataset["id"]),
+            )
+        return self.get(dataset["id"])
+
+    def processable(self, *, state: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        self.init_db()
+        if state:
+            if state not in DATASET_STATES:
+                raise ValueError(f"Unsupported dataset state: {state}")
+            states = [state]
+        else:
+            states = sorted(PROCESSABLE_STATES)
+        placeholders = ", ".join("?" for _ in states)
+        sql = f"SELECT * FROM datasets WHERE dataset_state IN ({placeholders}) ORDER BY created_at, name"
+        values: list[Any] = list(states)
+        if limit is not None:
+            sql += " LIMIT ?"
+            values.append(limit)
+        with self.connect() as conn:
+            return [decode_row(row) for row in conn.execute(sql, values)]
 
     def style(self, dataset_id_or_name: str) -> dict[str, Any] | None:
         dataset = self.get(dataset_id_or_name)
@@ -374,6 +512,8 @@ class DatasetCatalog:
             "visualization_type": visualization_type,
             "visualization_url": visualization_url,
             "style_json": fallback_style(sorted(geom_types)),
+            "dataset_state": "published",
+            "error_message": None,
             "metadata_json": metadata,
             "summary_json": summary,
         }
@@ -387,9 +527,10 @@ class DatasetCatalog:
                 num_coordinates, geometry_types, mbr, schema_json,
                 citation_json, visualization_type, visualization_url,
                 style_json, source_type, source_url, source_accessed_at,
-                source_modified_at, source_metadata_json, metadata_json, summary_json
+                source_modified_at, source_metadata_json, dataset_state,
+                error_message, metadata_json, summary_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 description = COALESCE(datasets.description, excluded.description),
                 size_bytes = excluded.size_bytes,
@@ -416,6 +557,8 @@ class DatasetCatalog:
                     excluded.source_metadata_json,
                     datasets.source_metadata_json
                 ),
+                dataset_state = excluded.dataset_state,
+                error_message = excluded.error_message,
                 metadata_json = excluded.metadata_json,
                 summary_json = excluded.summary_json,
                 updated_at = CURRENT_TIMESTAMP
@@ -439,6 +582,8 @@ class DatasetCatalog:
                 row.get("source_accessed_at"),
                 row.get("source_modified_at"),
                 json.dumps(row.get("source_metadata_json")) if row.get("source_metadata_json") else None,
+                row["dataset_state"],
+                row["error_message"],
                 json.dumps(row["metadata_json"]),
                 json.dumps(row["summary_json"]),
             ),
@@ -531,6 +676,9 @@ def matches_filters(dataset: dict[str, Any], filters: dict[str, str]) -> bool:
         return False
     if filters.get("max_size") and dataset.get("size_bytes", 0) > int(filters["max_size"]):
         return False
+    if filters.get("state") and filters["state"] != "all":
+        if dataset.get("dataset_state") != filters["state"]:
+            return False
     return True
 
 

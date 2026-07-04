@@ -65,8 +65,10 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 "geometry_type",
                 "min_size",
                 "max_size",
+                "state",
             }
         }
+        filters.setdefault("state", "published")
         if request.args.get("semantic") == "1" and filters.get("q"):
             llm = llm_client()
             llm_config = current_app.config["UCRSTAR2_CONFIG"].get("llm", {})

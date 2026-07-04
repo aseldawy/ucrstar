@@ -47,6 +47,7 @@ CLI commands log progress to the console at `INFO` level by default. Use
 
 ```bash
 .venv/bin/python src/ucrstar2/cli.py add-dataset path/to/source.geojson --name roads
+.venv/bin/python src/ucrstar2/cli.py add-dataset path/to/source.geojson --name roads --create-only
 ```
 
 The input can be a local path, a direct public download URL, an ArcGIS item URL,
@@ -67,9 +68,26 @@ metadata are copied into the catalog where possible. Large downloadable Esri
 items can take several minutes because they must be downloaded before Starlet
 starts its own tiling step.
 
-The command builds the dataset under `datasets/`, then refreshes the SQLite
-catalog so the dataset is immediately available through the REST API. Use
-`--overwrite` to replace an existing dataset with the same name.
+By default, the command registers the dataset source, builds the dataset under
+`datasets/`, refreshes the SQLite catalog, enriches metadata when configured,
+and publishes the dataset so it is immediately available through the REST API.
+Use `--create-only` to only insert the source record into the database in the
+`created` state. Use `--overwrite` to replace an existing dataset with the same
+name.
+
+To process created datasets later:
+
+```bash
+.venv/bin/python src/ucrstar2/cli.py process-dataset
+.venv/bin/python src/ucrstar2/cli.py process-dataset --limit 10
+.venv/bin/python src/ucrstar2/cli.py process-dataset roads
+```
+
+Datasets move through `created`, `downloaded`, `processed`, `ready`, and
+`published`. If processing fails, the dataset is marked `error` and the error is
+stored in the catalog. `/datasets.json` returns only `published` datasets by
+default; pass `state=created`, `state=error`, or `state=all` to inspect other
+states.
 
 The catalog records how each dataset was added: source type, source URL or local
 path, access time, source modified time when available, and source metadata. The

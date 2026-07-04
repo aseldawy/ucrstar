@@ -77,7 +77,128 @@ def test_add_dataset_builds_and_catalogs_dataset(
     dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
     assert dataset["source"]["type"] == "local"
     assert dataset["source"]["url"] == str(input_path.resolve())
+    assert dataset["dataset_state"] == "published"
     assert "Added dataset roads with ID" in caplog.text
+
+
+def test_add_dataset_create_only_registers_source_without_building(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    calls = {}
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    input_path = tmp_path / "source.geojson"
+    input_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    caplog.set_level(logging.INFO)
+
+    def fake_add_dataset(*args, **kwargs):
+        calls["add_dataset"] = True
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar2",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            str(input_path),
+            "--name",
+            "roads",
+            "--create-only",
+        ],
+    )
+
+    cli.main()
+
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    assert dataset["dataset_state"] == "created"
+    assert dataset["source"]["url"] == str(input_path.resolve())
+    assert calls == {}
+    assert "Registered dataset 'roads' in created state" in caplog.text
+
+
+def test_process_dataset_processes_created_dataset(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    calls = {}
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    input_path = tmp_path / "source.geojson"
+    input_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    caplog.set_level(logging.INFO)
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        calls["input_arg"] = input_arg
+        calls["name"] = kwargs["name"]
+        (Path(datasets_arg) / kwargs["name"]).mkdir(parents=True)
+        return None, None, None
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(
+        cli.starlet,
+        "list_datasets",
+        lambda root: sorted(path.name for path in Path(root).iterdir() if path.is_dir()) if Path(root).exists() else [],
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": Path(dataset).name,
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    catalog.register_source(
+        "roads",
+        cli.registration_source(str(input_path)),
+        overwrite=True,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar2",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "process-dataset",
+            "--limit",
+            "1",
+        ],
+    )
+
+    cli.main()
+
+    dataset = catalog.get("roads")
+    assert calls["input_arg"] == str(input_path.resolve())
+    assert calls["name"] == "roads"
+    assert dataset["dataset_state"] == "published"
+    assert "Published dataset roads with ID" in caplog.text
 
 
 def test_delete_dataset_removes_folder_and_catalog_entry(
