@@ -203,6 +203,18 @@ select {
   line-height: 1.45;
 }
 
+.source-row {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.source-row a {
+  color: #075c94;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS datasets (
     visualization_type TEXT,
     visualization_url TEXT,
     style_json TEXT,
+    source_type TEXT,
+    source_url TEXT,
+    source_accessed_at TEXT,
+    source_modified_at TEXT,
+    source_metadata_json TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     summary_json TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -86,6 +91,11 @@ class DatasetCatalog:
         with self.connect() as conn:
             conn.executescript(SCHEMA_SQL)
             ensure_column(conn, "datasets", "style_json", "TEXT")
+            ensure_column(conn, "datasets", "source_type", "TEXT")
+            ensure_column(conn, "datasets", "source_url", "TEXT")
+            ensure_column(conn, "datasets", "source_accessed_at", "TEXT")
+            ensure_column(conn, "datasets", "source_modified_at", "TEXT")
+            ensure_column(conn, "datasets", "source_metadata_json", "TEXT")
 
     def sync(self) -> list[dict[str, Any]]:
         self.init_db()
@@ -206,6 +216,34 @@ class DatasetCatalog:
             conn.execute("DELETE FROM dataset_embeddings WHERE dataset_id = ?", (dataset["id"],))
             conn.execute("DELETE FROM datasets WHERE id = ?", (dataset["id"],))
         return dataset
+
+    def update_source(self, dataset_id_or_name: str, source: dict[str, Any]) -> dict[str, Any] | None:
+        dataset = self.get(dataset_id_or_name)
+        if dataset is None:
+            return None
+        self.init_db()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE datasets
+                SET source_type = ?,
+                    source_url = ?,
+                    source_accessed_at = ?,
+                    source_modified_at = ?,
+                    source_metadata_json = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    source.get("type"),
+                    source.get("url"),
+                    source.get("accessed_at"),
+                    source.get("modified_at"),
+                    json.dumps(source.get("metadata") or {}),
+                    dataset["id"],
+                ),
+            )
+        return self.get(dataset["id"])
 
     def style(self, dataset_id_or_name: str) -> dict[str, Any] | None:
         dataset = self.get(dataset_id_or_name)
@@ -348,9 +386,10 @@ class DatasetCatalog:
                 id, name, description, size_bytes, num_features,
                 num_coordinates, geometry_types, mbr, schema_json,
                 citation_json, visualization_type, visualization_url,
-                style_json, metadata_json, summary_json
+                style_json, source_type, source_url, source_accessed_at,
+                source_modified_at, source_metadata_json, metadata_json, summary_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 description = COALESCE(datasets.description, excluded.description),
                 size_bytes = excluded.size_bytes,
@@ -363,6 +402,20 @@ class DatasetCatalog:
                 visualization_type = excluded.visualization_type,
                 visualization_url = excluded.visualization_url,
                 style_json = COALESCE(datasets.style_json, excluded.style_json),
+                source_type = COALESCE(excluded.source_type, datasets.source_type),
+                source_url = COALESCE(excluded.source_url, datasets.source_url),
+                source_accessed_at = COALESCE(
+                    excluded.source_accessed_at,
+                    datasets.source_accessed_at
+                ),
+                source_modified_at = COALESCE(
+                    excluded.source_modified_at,
+                    datasets.source_modified_at
+                ),
+                source_metadata_json = COALESCE(
+                    excluded.source_metadata_json,
+                    datasets.source_metadata_json
+                ),
                 metadata_json = excluded.metadata_json,
                 summary_json = excluded.summary_json,
                 updated_at = CURRENT_TIMESTAMP
@@ -381,6 +434,11 @@ class DatasetCatalog:
                 row["visualization_type"],
                 row["visualization_url"],
                 json.dumps(row["style_json"]),
+                row.get("source_type"),
+                row.get("source_url"),
+                row.get("source_accessed_at"),
+                row.get("source_modified_at"),
+                json.dumps(row.get("source_metadata_json")) if row.get("source_metadata_json") else None,
                 json.dumps(row["metadata_json"]),
                 json.dumps(row["summary_json"]),
             ),
@@ -395,6 +453,7 @@ def decode_row(row: sqlite3.Row) -> dict[str, Any]:
         "schema_json",
         "citation_json",
         "style_json",
+        "source_metadata_json",
         "metadata_json",
         "summary_json",
         "vector_json",
@@ -412,6 +471,14 @@ def decode_row(row: sqlite3.Row) -> dict[str, Any]:
         }
     if "style_json" in result:
         result["style"] = result.pop("style_json")
+    if "source_type" in result:
+        result["source"] = {
+            "type": result.pop("source_type"),
+            "url": result.pop("source_url", None),
+            "accessed_at": result.pop("source_accessed_at", None),
+            "modified_at": result.pop("source_modified_at", None),
+            "metadata": result.pop("source_metadata_json", None) or {},
+        }
     result.pop("vector_json", None)
     return result
 

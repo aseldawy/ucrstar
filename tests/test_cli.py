@@ -13,6 +13,7 @@ def test_add_dataset_builds_and_catalogs_dataset(
     datasets_dir = tmp_path / "datasets"
     db_path = tmp_path / "instance" / "catalog.sqlite"
     input_path = tmp_path / "source.geojson"
+    input_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
     caplog.set_level(logging.INFO)
 
     def fake_add_dataset(input_arg, datasets_arg, **kwargs):
@@ -73,6 +74,9 @@ def test_add_dataset_builds_and_catalogs_dataset(
     assert calls["kwargs"]["overwrite"] is True
     assert calls["kwargs"]["zoom"] == 8
     assert calls["kwargs"]["covering_bbox"] is True
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    assert dataset["source"]["type"] == "local"
+    assert dataset["source"]["url"] == str(input_path.resolve())
     assert "Added dataset roads with ID" in caplog.text
 
 
@@ -142,3 +146,96 @@ def test_delete_dataset_removes_folder_and_catalog_entry(
     assert calls["kwargs"]["missing_ok"] is False
     assert catalog.get(dataset["id"]) is None
     assert "Deleted dataset roads with ID" in caplog.text
+
+
+def test_refresh_rebuilds_newer_source_under_temporary_name(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    calls = []
+    datasets_dir = tmp_path / "datasets"
+    roads_dir = datasets_dir / "roads"
+    roads_dir.mkdir(parents=True)
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    source_path = tmp_path / "roads.geojson"
+    source_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setattr(
+        cli.starlet,
+        "list_datasets",
+        lambda root: sorted(path.name for path in Path(root).iterdir() if path.is_dir()),
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": Path(dataset).name,
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        calls.append(kwargs["name"])
+        (Path(datasets_arg) / kwargs["name"]).mkdir(parents=True)
+        return None, None, None
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    def fake_delete_dataset(datasets_arg, name_arg, **kwargs):
+        target = Path(datasets_arg) / name_arg
+        if target.exists():
+            target.rmdir()
+            return True
+        return False
+
+    monkeypatch.setattr(cli.starlet, "delete_dataset", fake_delete_dataset)
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    dataset = catalog.sync()[0]
+    catalog.update_source(
+        dataset["id"],
+        {
+            "type": "local",
+            "url": str(source_path),
+            "accessed_at": "2026-01-01T00:00:00+00:00",
+            "modified_at": "2026-01-01T00:00:00+00:00",
+            "metadata": {"path": str(source_path)},
+        },
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar2",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "refresh",
+            "roads",
+        ],
+    )
+
+    cli.main()
+
+    assert calls
+    assert calls[0].startswith("roads__refresh_")
+    refreshed = catalog.get("roads")
+    assert refreshed["source"]["url"] == str(source_path.resolve())
+    assert "Refreshed dataset roads with ID" in caplog.text

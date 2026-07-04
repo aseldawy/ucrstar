@@ -369,6 +369,7 @@ function renderDatasetDetails(dataset) {
   root.innerHTML = `
     <section class="detail-section">
       <p>${escapeHtml(dataset.description || "No description available.")}</p>
+      ${renderSource(dataset.source)}
     </section>
     <section class="detail-section">
       <div class="stats-grid">
@@ -408,6 +409,33 @@ function renderDatasetDetails(dataset) {
   const select = document.querySelector("#download-format");
   select.addEventListener("change", () => updateDownloadLinks(dataset));
   updateDownloadLinks(dataset);
+}
+
+function renderSource(source) {
+  if (!source || !source.url) {
+    return "";
+  }
+  const label = source.type === "local" ? "Local source" : "Source";
+  const href = source.url.startsWith("http://") || source.url.startsWith("https://")
+    ? source.url
+    : "";
+  const modified = source.modified_at
+    ? `<span class="muted">Updated ${escapeHtml(formatDateTime(source.modified_at))}</span>`
+    : "";
+  if (!href) {
+    return `
+      <div class="source-row">
+        <span>${escapeHtml(label)}: ${escapeHtml(source.url)}</span>
+        ${modified}
+      </div>
+    `;
+  }
+  return `
+    <div class="source-row">
+      <a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>
+      ${modified}
+    </div>
+  `;
 }
 
 function updateDownloadLinks(dataset) {
@@ -728,6 +756,14 @@ function formatValue(value) {
     return JSON.stringify(value);
   }
   return String(value);
+}
+
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
 }
 
 function escapeHtml(value) {

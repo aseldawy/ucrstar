@@ -49,10 +49,31 @@ CLI commands log progress to the console at `INFO` level by default. Use
 .venv/bin/python src/ucrstar2/cli.py add-dataset path/to/source.geojson --name roads
 ```
 
-This uses `starlet.add_dataset()` to build the dataset under `datasets/`, then
-refreshes the SQLite catalog so the dataset is immediately available through
-the REST API. Use `--overwrite` to replace an existing dataset with the same
-name.
+The input can be a local path, a direct public download URL, an ArcGIS item URL,
+an Esri Hub dataset URL, or a public ArcGIS FeatureServer layer URL:
+
+```bash
+.venv/bin/python src/ucrstar2/cli.py add-dataset \
+  "https://hub.arcgis.com/datasets/example::roads/about" \
+  --name roads
+```
+
+For remote Esri sources, the command resolves the dataset metadata. Public
+FeatureServer layers are exported to a temporary GeoJSON file. Downloadable
+ArcGIS items such as File Geodatabase, Shapefile, or GeoPackage downloads are
+downloaded directly and passed to `starlet.add_dataset()` in their source
+format. Source descriptions, attribute aliases, citations, and useful source
+metadata are copied into the catalog where possible. Large downloadable Esri
+items can take several minutes because they must be downloaded before Starlet
+starts its own tiling step.
+
+The command builds the dataset under `datasets/`, then refreshes the SQLite
+catalog so the dataset is immediately available through the REST API. Use
+`--overwrite` to replace an existing dataset with the same name.
+
+The catalog records how each dataset was added: source type, source URL or local
+path, access time, source modified time when available, and source metadata. The
+dataset details panel in the frontend shows a source link or local source path.
 
 The command logs each major step, including Starlet build completion, catalog
 sync, selected LLM provider/model, LLM enrichment, embedding creation, and any
@@ -64,6 +85,26 @@ If LLM support is enabled, `add-dataset` also enriches the catalog entry:
 - adds short descriptions for attributes from Starlet stats
 - creates a default MapLibre style
 - stores a dataset embedding for semantic search
+
+## Refresh Datasets
+
+```bash
+.venv/bin/python src/ucrstar2/cli.py refresh
+.venv/bin/python src/ucrstar2/cli.py refresh roads
+.venv/bin/python src/ucrstar2/cli.py refresh roads --force
+```
+
+`refresh` checks source-backed datasets and rebuilds only those whose source has
+a newer modification timestamp than the catalog entry. For local datasets, this
+uses the local file or directory modification time. For Esri sources, this uses
+ArcGIS item or layer modification metadata when available. For direct remote
+files, this uses the HTTP `Last-Modified` header when available.
+
+Refresh builds the replacement under a temporary dataset name first. If the
+build succeeds, it swaps the new dataset directory into place and updates the
+catalog source metadata. If the build fails, the existing dataset is left in
+place. Use `--force` to rebuild even when the timestamp does not show a newer
+source.
 
 ## Delete Datasets
 
