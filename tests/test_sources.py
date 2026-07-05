@@ -3,6 +3,26 @@ from pathlib import Path
 from ucrstar2 import sources
 
 
+def test_esri_attribute_metadata_normalizes_types_and_keeps_originals() -> None:
+    attributes = sources.esri_attribute_metadata(
+        {
+            "fields": [
+                {"name": "OBJECTID", "type": "esriFieldTypeOID", "alias": "Object ID"},
+                {"name": "CODE", "type": "esriFieldTypeString", "alias": "Code"},
+                {"name": "HEIGHT", "type": "esriFieldTypeDouble", "alias": "Height"},
+                {"name": "COUNT", "type": "esriFieldTypeSmallInteger", "alias": "Count"},
+            ]
+        }
+    )
+
+    assert attributes == [
+        {"name": "OBJECTID", "type": "OID", "esri_type": "esriFieldTypeOID", "description": "Object ID"},
+        {"name": "CODE", "type": "String", "esri_type": "esriFieldTypeString", "description": "Code"},
+        {"name": "HEIGHT", "type": "Double", "esri_type": "esriFieldTypeDouble", "description": "Height"},
+        {"name": "COUNT", "type": "Integer", "esri_type": "esriFieldTypeSmallInteger", "description": "Count"},
+    ]
+
+
 def test_source_reference_for_remote_file_uses_http_timestamp(monkeypatch) -> None:
     monkeypatch.setattr(
         sources,
@@ -65,3 +85,36 @@ def test_hub_dataset_item_url_downloads_arcgis_item_data(monkeypatch) -> None:
         "https://www.arcgis.com/sharing/rest/content/items/"
         "cdd4c011519849caa62286044f1d31c9/data"
     )
+
+
+def test_prepare_arcgis_service_keeps_original_schema(monkeypatch) -> None:
+    layer = {
+        "id": 0,
+        "name": "Buildings",
+        "geometryType": "esriGeometryPolygon",
+        "fields": [
+            {"name": "HEIGHT", "type": "esriFieldTypeDouble", "alias": "Height"},
+        ],
+    }
+
+    monkeypatch.setattr(sources, "fetch_json", lambda url, params=None, **kwargs: layer)
+
+    def fake_export(layer_url, layer_metadata, target):
+        Path(target).write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+
+    monkeypatch.setattr(sources, "export_arcgis_layer_geojson", fake_export)
+
+    with sources.prepare_arcgis_service(
+        "https://services.example.com/FeatureServer/0",
+        original_url="https://hub.example.com/datasets/buildings/about",
+    ) as prepared:
+        metadata = prepared.source["metadata"]
+        assert metadata["attributes"] == [
+            {
+                "name": "HEIGHT",
+                "type": "Double",
+                "esri_type": "esriFieldTypeDouble",
+                "description": "Height",
+            }
+        ]
+        assert metadata["original_schema"] == layer["fields"]

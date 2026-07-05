@@ -49,12 +49,13 @@ CLI commands log progress to the console at `INFO` level by default. Use
 .venv/bin/python src/ucrstar2/cli.py add-dataset path/to/source.geojson --name roads
 .venv/bin/python src/ucrstar2/cli.py add-dataset https://example.com/data/roads.geojson --name roads
 .venv/bin/python src/ucrstar2/cli.py add-dataset path/to/source.geojson --name roads --create-only
+.venv/bin/python src/ucrstar2/cli.py add-dataset https://egis-lacounty.hub.arcgis.com/search --create-only
 ```
 
 The input can be a local path, a direct public download URL, an ArcGIS item URL,
-an Esri Hub dataset URL, or a public ArcGIS FeatureServer layer URL. Local paths
-are processed directly. Direct public URLs are downloaded to a temporary
-directory and then passed to Starlet:
+an Esri Hub dataset URL, an Esri Hub repository/search URL, or a public ArcGIS
+FeatureServer layer URL. Local paths are processed directly. Direct public URLs
+are downloaded to a temporary directory and then passed to Starlet:
 
 ```bash
 .venv/bin/python src/ucrstar2/cli.py add-dataset \
@@ -70,6 +71,14 @@ format. Source descriptions, attribute aliases, citations, and useful source
 metadata are copied into the catalog where possible. Large downloadable Esri
 items can take several minutes because they must be downloaded before Starlet
 starts its own tiling step.
+
+When `add-dataset` points to an Esri Hub repository URL such as
+`https://egis-lacounty.hub.arcgis.com/search`, it scans the repository and
+registers each eligible vector dataset as a separate catalog entry. With
+`--create-only`, it stores the source URL, timestamps, Hub search record,
+ArcGIS item metadata, service/layer metadata when available, and download links
+without processing any datasets. Without `--create-only`, each registered
+dataset is processed one at a time.
 
 By default, the command registers the dataset source, builds the dataset under
 `datasets/`, refreshes the SQLite catalog, enriches metadata when configured,

@@ -225,6 +225,7 @@ def prepare_arcgis_service(
             "metadata": {
                 "item": slim_arcgis_item(item) if item else None,
                 "layer": slim_arcgis_layer(layer),
+                "original_schema": layer.get("fields") or [],
                 "item_id": item.get("id") if item else None,
                 "resolved_url": layer_url,
                 "title": (item or {}).get("title") or layer.get("name"),
@@ -280,6 +281,7 @@ def current_source_state(source: dict[str, Any]) -> dict[str, Any]:
             "metadata": {
                 **metadata,
                 "layer": slim_arcgis_layer(layer),
+                "original_schema": layer.get("fields") or metadata.get("original_schema") or [],
                 "resolved_url": layer_url,
                 "attributes": esri_attribute_metadata(layer),
             },
@@ -609,14 +611,37 @@ def slim_arcgis_layer(layer: dict[str, Any]) -> dict[str, Any]:
 def esri_attribute_metadata(layer: dict[str, Any]) -> list[dict[str, Any]]:
     attributes = []
     for field in layer.get("fields") or []:
+        raw_type = field.get("type")
         attributes.append(
             {
                 "name": field.get("name"),
-                "type": field.get("type"),
+                "type": normalize_esri_field_type(raw_type),
+                "esri_type": raw_type,
                 "description": field.get("alias") or field.get("name"),
             }
         )
     return attributes
+
+
+def normalize_esri_field_type(value: str | None) -> str | None:
+    if not value:
+        return None
+    type_name = value.removeprefix("esriFieldType")
+    return {
+        "OID": "OID",
+        "GlobalID": "GlobalID",
+        "GUID": "GUID",
+        "SmallInteger": "Integer",
+        "Integer": "Integer",
+        "Single": "Float",
+        "Double": "Double",
+        "String": "String",
+        "Date": "Date",
+        "Blob": "Blob",
+        "Raster": "Raster",
+        "Geometry": "Geometry",
+        "XML": "XML",
+    }.get(type_name, type_name or value)
 
 
 def clean_html(value: str | None) -> str | None:

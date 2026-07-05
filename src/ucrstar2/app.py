@@ -179,7 +179,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         return jsonify({"error": f"unsupported sample format: {fmt}"}), 400
 
     @app.get("/datasets/<dataset_ref>/tiles/<int:z>/<int:x>/<int:y>.mvt")
-    @app.get("/tiles/<dataset_ref>/<int:z>/<int:x>/<int:y>.mvt")
     def tile(dataset_ref: str, z: int, x: int, y: int) -> Response:
         catalog().sync()
         dataset = require_dataset(dataset_ref)

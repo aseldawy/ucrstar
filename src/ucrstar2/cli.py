@@ -6,7 +6,7 @@ import logging
 import shutil
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,15 +18,17 @@ if __package__:
     from .app import create_app
     from .catalog import DatasetCatalog
     from .config import load_config
+    from .esri_hub import EsriHubClient, HubDataset
     from .llm import llm_from_config
-    from .sources import current_source_state, source_reference, prepare_input_source
+    from .sources import clean_html, current_source_state, source_reference, prepare_input_source, utc_now_iso
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ucrstar2.app import create_app
     from ucrstar2.catalog import DatasetCatalog
     from ucrstar2.config import load_config
+    from ucrstar2.esri_hub import EsriHubClient, HubDataset
     from ucrstar2.llm import llm_from_config
-    from ucrstar2.sources import current_source_state, source_reference, prepare_input_source
+    from ucrstar2.sources import clean_html, current_source_state, source_reference, prepare_input_source, utc_now_iso
 
 
 def main() -> None:
@@ -40,7 +42,11 @@ def main() -> None:
     serve = subparsers.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
-    serve.add_argument("--debug", action="store_true")
+    serve.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable Flask debug mode for development error pages and the interactive debugger.",
+    )
     serve.add_argument(
         "--reload",
         action="store_true",
@@ -122,7 +128,7 @@ def main() -> None:
 
     if args.command == "add-dataset":
         LOGGER.info("Adding dataset from %s", args.input_path)
-        dataset = add_dataset_from_source(
+        added = add_dataset_from_source(
             catalog,
             args.input_path,
             args.name,
@@ -132,7 +138,10 @@ def main() -> None:
             build_kwargs_from_args(args),
             project_config,
         )
-        LOGGER.info("Added dataset %s with ID %s.", dataset["name"], dataset["id"])
+        if isinstance(added, list):
+            LOGGER.info("Added %d dataset(s).", len(added))
+        else:
+            LOGGER.info("Added dataset %s with ID %s.", added["name"], added["id"])
         return
     if args.command == "process-dataset":
         processed = process_datasets(
@@ -230,7 +239,20 @@ def add_dataset_from_source(
     create_only: bool,
     build_kwargs: dict[str, Any],
     project_config: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, Any] | list[dict[str, Any]]:
+    if is_esri_hub_repository_url(input_path_or_url):
+        if dataset_name:
+            raise ValueError("--name cannot be used when adding an Esri Hub repository")
+        return add_esri_hub_repository(
+            catalog,
+            input_path_or_url,
+            datasets_dir,
+            overwrite,
+            create_only,
+            build_kwargs,
+            project_config,
+        )
+
     if create_only:
         source = registration_source(input_path_or_url)
         dataset_name = dataset_name or dataset_name_from_source(source, source_name_path(input_path_or_url, source))
@@ -256,6 +278,157 @@ def add_dataset_from_source(
     except Exception as exc:
         catalog.update_state(dataset["id"], "error", error_message=str(exc))
         raise
+
+
+def add_esri_hub_repository(
+    catalog: DatasetCatalog,
+    repository_url: str,
+    datasets_dir: str | Path,
+    overwrite: bool,
+    create_only: bool,
+    build_kwargs: dict[str, Any],
+    project_config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    client = EsriHubClient(repository_url)
+    added: list[dict[str, Any]] = []
+    LOGGER.info("Scanning Esri Hub repository %s", client.site_url)
+    for hub_dataset in client.iter_datasets(page_size=100):
+        metadata = hub_dataset_metadata(client, hub_dataset)
+        if not is_supported_hub_dataset(hub_dataset, metadata):
+            LOGGER.debug(
+                "Skipping Esri Hub dataset '%s' (%s): unsupported type or no vector source",
+                hub_dataset.title,
+                hub_dataset.id,
+            )
+            continue
+
+        source = esri_hub_source(client, hub_dataset, metadata)
+        dataset_name = dataset_name_from_source(source, Path(hub_dataset.title))
+        try:
+            dataset = catalog.register_source(
+                dataset_name,
+                source,
+                description=(source.get("metadata") or {}).get("description"),
+                overwrite=overwrite,
+            )
+            LOGGER.info("Registered Esri Hub dataset '%s' in created state", dataset["name"])
+            if not create_only:
+                dataset = process_registered_dataset(
+                    catalog,
+                    dataset,
+                    datasets_dir,
+                    overwrite,
+                    build_kwargs,
+                    project_config,
+                )
+            added.append(dataset)
+        except Exception as exc:
+            existing = catalog.get(dataset_name)
+            if existing is not None:
+                catalog.update_state(existing["id"], "error", error_message=str(exc))
+            LOGGER.exception("Failed to add Esri Hub dataset '%s'", dataset_name)
+            if not create_only:
+                continue
+            raise
+    LOGGER.info("Esri Hub repository scan added %d eligible dataset(s)", len(added))
+    return added
+
+
+def hub_dataset_metadata(client: EsriHubClient, dataset: HubDataset) -> dict[str, Any]:
+    try:
+        return client.metadata(dataset.id)
+    except Exception:
+        LOGGER.exception("Could not fetch full Esri Hub metadata for '%s'; using search record", dataset.id)
+        return {
+            "record": dataset.record,
+            "properties": dataset.properties,
+            "download_links": [link.__dict__ for link in client.download_links(dataset)],
+        }
+
+
+def is_supported_hub_dataset(dataset: HubDataset, metadata: dict[str, Any]) -> bool:
+    item_type = (dataset.item_type or "").lower()
+    if item_type in {"feature service", "feature layer"}:
+        return True
+    if metadata.get("layer"):
+        return True
+    formats = {str(link.get("format", "")).lower() for link in metadata.get("download_links") or []}
+    return bool(formats & {"geojson", "shapefile", "filegdb", "fgdb", "geopackage", "csv"})
+
+
+def esri_hub_source(
+    client: EsriHubClient,
+    dataset: HubDataset,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    item = metadata.get("arcgis_item") or {}
+    source_url = item_url(dataset.item_id)
+    modified_at = timestamp_from_millis(item.get("modified"))
+    description = clean_text(
+        item.get("description")
+        or item.get("snippet")
+        or dataset.properties.get("description")
+        or dataset.properties.get("snippet")
+    )
+    title = item.get("title") or dataset.title
+    return {
+        "type": "esri_hub",
+        "url": source_url,
+        "accessed_at": utc_now_iso(),
+        "modified_at": modified_at,
+        "metadata": {
+            "repository": {
+                "site_url": client.site_url,
+                "search_base_url": client.search_base_url,
+                "download_base_url": client.download_base_url,
+            },
+            "record_id": dataset.id,
+            "item_id": dataset.item_id,
+            "layer_id": dataset.layer_id,
+            "title": title,
+            "description": description,
+            "type": dataset.item_type,
+            "service_url": dataset.service_url,
+            "download_formats": dataset.download_formats,
+            "download_links": metadata.get("download_links") or [],
+            "hub": metadata,
+        },
+    }
+
+
+def is_esri_hub_repository_url(value: str) -> bool:
+    parsed = urllib_parse(value)
+    if "hub.arcgis.com" not in parsed.netloc.lower():
+        return False
+    return "/datasets/" not in parsed.path.lower()
+
+
+def urllib_parse(value: str):
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(value)
+    if not parsed.scheme:
+        parsed = urllib.parse.urlparse(f"https://{value}")
+    return parsed
+
+
+def item_url(item_id: str) -> str:
+    return f"https://www.arcgis.com/home/item.html?id={item_id}"
+
+
+def timestamp_from_millis(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def clean_text(value: Any) -> str | None:
+    if not value:
+        return None
+    return clean_html(str(value))
 
 
 def registration_source(input_path_or_url: str) -> dict[str, Any]:

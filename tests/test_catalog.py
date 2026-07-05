@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ucrstar2.catalog import DatasetCatalog, normalize_style
+from ucrstar2.catalog import DatasetCatalog, normalize_schema_type, normalize_style
 
 
 def test_catalog_sync_keeps_stable_id(tmp_path: Path, monkeypatch) -> None:
@@ -142,6 +142,13 @@ def test_normalize_style_flattens_nested_paint_and_ignores_source_layer() -> Non
     assert "paint" not in normalized["layers"]["line"]
     assert normalized["layers"]["circle"]["circle-color"] == "#808080"
     assert normalized["layers"]["circle"]["circle-radius"] == 5
+
+
+def test_normalize_schema_type_simplifies_esri_field_types() -> None:
+    assert normalize_schema_type("esriFieldTypeDouble") == "Double"
+    assert normalize_schema_type("esriFieldTypeString") == "String"
+    assert normalize_schema_type("esriFieldTypeSmallInteger") == "Integer"
+    assert normalize_schema_type("text") == "text"
 
 
 def test_catalog_logs_llm_enrichment_failures(

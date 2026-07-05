@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 
 from ucrstar2 import cli
+from ucrstar2.esri_hub import HubDataset
 from ucrstar2.sources import PreparedSource
 
 
@@ -173,6 +174,110 @@ def test_add_dataset_create_only_registers_remote_source_timestamp(
     assert dataset["source"]["url"] == url
     assert dataset["source"]["modified_at"] == "2026-06-30T06:24:35+00:00"
     assert dataset["source"]["metadata"]["content_type"] == "application/geo+json"
+
+
+def test_add_dataset_create_only_registers_esri_hub_repository(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    calls = {}
+
+    class FakeHubClient:
+        site_url = "https://egis-lacounty.hub.arcgis.com"
+        search_base_url = "https://egis-lacounty.hub.arcgis.com/api/search/v1"
+        download_base_url = "https://egis-lacounty.hub.arcgis.com/api/download/v1"
+
+        def __init__(self, site_url):
+            calls["site_url"] = site_url
+
+        def iter_datasets(self, **kwargs):
+            calls["iter_kwargs"] = kwargs
+            return iter(
+                [
+                    HubDataset(
+                        {
+                            "id": "11111111111111111111111111111111_0",
+                            "properties": {
+                                "title": "Address Points",
+                                "type": "Feature Layer",
+                                "url": "https://services.example.com/FeatureServer",
+                                "properties": {"downloads": {"formats": [{"key": "geojson"}]}},
+                            },
+                        }
+                    ),
+                    HubDataset(
+                        {
+                            "id": "22222222222222222222222222222222",
+                            "properties": {"title": "PDF Map", "type": "PDF"},
+                        }
+                    ),
+                ]
+            )
+
+        def metadata(self, record_id):
+            if record_id == "22222222222222222222222222222222":
+                return {
+                    "record": {"id": record_id},
+                    "properties": {"title": "PDF Map"},
+                    "arcgis_item": {
+                        "id": "22222222222222222222222222222222",
+                        "title": "PDF Map",
+                        "type": "PDF",
+                    },
+                    "download_links": [],
+                }
+            return {
+                "record": {"id": record_id},
+                "properties": {"title": "Address Points"},
+                "arcgis_item": {
+                    "id": "11111111111111111111111111111111",
+                    "title": "Address Points",
+                    "description": "<p>Address point layer</p>",
+                    "modified": 1782800675000,
+                },
+                "layer": {"geometryType": "esriGeometryPoint"},
+                "download_links": [{"format": "geojson", "url": "https://example.com/download"}],
+            }
+
+    def fake_add_dataset(*args, **kwargs):
+        calls["add_dataset"] = True
+
+    monkeypatch.setattr(cli, "EsriHubClient", FakeHubClient)
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar2",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            "https://egis-lacounty.hub.arcgis.com/search",
+            "--create-only",
+        ],
+    )
+
+    cli.main()
+
+    datasets = cli.DatasetCatalog(db_path, datasets_dir).list({"state": "created"})
+    assert [dataset["name"] for dataset in datasets] == ["Address_Points"]
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("Address_Points")
+    assert dataset is not None
+    assert calls["site_url"] == "https://egis-lacounty.hub.arcgis.com/search"
+    assert calls["iter_kwargs"] == {"page_size": 100}
+    assert calls.get("add_dataset") is None
+    assert dataset["description"] == "Address point layer"
+    assert dataset["source"]["type"] == "esri_hub"
+    assert dataset["source"]["url"] == "https://www.arcgis.com/home/item.html?id=11111111111111111111111111111111"
+    assert dataset["source"]["modified_at"] == "2026-06-30T06:24:35+00:00"
+    assert dataset["source"]["metadata"]["record_id"] == "11111111111111111111111111111111_0"
+    assert dataset["source"]["metadata"]["repository"]["site_url"] == "https://egis-lacounty.hub.arcgis.com"
+    assert dataset["source"]["metadata"]["hub"]["arcgis_item"]["title"] == "Address Points"
 
 
 def test_process_dataset_processes_created_dataset(

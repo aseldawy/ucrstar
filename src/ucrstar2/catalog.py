@@ -85,16 +85,19 @@ class DatasetCatalog:
     datasets_dir: Path
 
     def __post_init__(self) -> None:
+        """Normalize catalog paths after dataclass initialization."""
         object.__setattr__(self, "db_path", Path(self.db_path))
         object.__setattr__(self, "datasets_dir", Path(self.datasets_dir))
 
     def connect(self) -> sqlite3.Connection:
+        """Open a SQLite connection configured to return rows by column name."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
     def init_db(self) -> None:
+        """Create or migrate the catalog tables needed by the application."""
         with self.connect() as conn:
             conn.executescript(SCHEMA_SQL)
             ensure_column(conn, "datasets", "style_json", "TEXT")
@@ -107,6 +110,7 @@ class DatasetCatalog:
             ensure_column(conn, "datasets", "error_message", "TEXT")
 
     def sync(self) -> list[dict[str, Any]]:
+        """Read Starlet dataset directories and upsert their metadata into SQLite."""
         self.init_db()
         synced: list[dict[str, Any]] = []
         names = starlet.list_datasets(self.datasets_dir)
@@ -126,6 +130,7 @@ class DatasetCatalog:
         return synced
 
     def list(self, filters: dict[str, str]) -> list[dict[str, Any]]:
+        """Return lightweight dataset rows that match text, size, geometry, and state filters."""
         self.init_db()
         clauses: list[str] = []
         values: list[Any] = []
@@ -179,6 +184,7 @@ class DatasetCatalog:
         *,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
+        """Rank embedded datasets by vector similarity to a natural-language query."""
         self.init_db()
         query_vector = llm.embed(query)
         provider, model = split_embedding_key(llm.embedding_key)
@@ -210,6 +216,7 @@ class DatasetCatalog:
         return results
 
     def get(self, dataset_id_or_name: str) -> dict[str, Any] | None:
+        """Fetch a full dataset row by UUID first, then by dataset name."""
         self.init_db()
         with self.connect() as conn:
             row = conn.execute(
@@ -224,6 +231,7 @@ class DatasetCatalog:
             return decode_row(row) if row is not None else None
 
     def delete(self, dataset_id_or_name: str) -> dict[str, Any] | None:
+        """Delete a dataset row and its embeddings, returning the deleted dataset."""
         dataset = self.get(dataset_id_or_name)
         if dataset is None:
             return None
@@ -234,6 +242,7 @@ class DatasetCatalog:
         return dataset
 
     def update_source(self, dataset_id_or_name: str, source: dict[str, Any]) -> dict[str, Any] | None:
+        """Replace the stored source provenance for an existing dataset."""
         dataset = self.get(dataset_id_or_name)
         if dataset is None:
             return None
@@ -269,6 +278,7 @@ class DatasetCatalog:
         description: str | None = None,
         overwrite: bool = False,
     ) -> dict[str, Any]:
+        """Register source metadata for a dataset before it has been processed."""
         self.init_db()
         existing = self.get(name)
         if existing is not None and not overwrite:
@@ -347,6 +357,7 @@ class DatasetCatalog:
         *,
         error_message: str | None = None,
     ) -> dict[str, Any] | None:
+        """Move a dataset to a lifecycle state and optionally store an error message."""
         if state not in DATASET_STATES:
             raise ValueError(f"Unsupported dataset state: {state}")
         dataset = self.get(dataset_id_or_name)
@@ -367,6 +378,7 @@ class DatasetCatalog:
         return self.get(dataset["id"])
 
     def processable(self, *, state: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        """List datasets that are eligible for deferred processing."""
         self.init_db()
         if state:
             if state not in DATASET_STATES:
@@ -384,12 +396,14 @@ class DatasetCatalog:
             return [decode_row(row) for row in conn.execute(sql, values)]
 
     def style(self, dataset_id_or_name: str) -> dict[str, Any] | None:
+        """Return the normalized MapLibre style for a dataset."""
         dataset = self.get(dataset_id_or_name)
         if dataset is None:
             return None
         return normalize_style(dataset.get("style"), dataset.get("geometry_types"))
 
     def enrich(self, dataset_id_or_name: str, llm: Any) -> dict[str, Any] | None:
+        """Use an LLM to improve descriptions, schema text, style, and embeddings."""
         self.init_db()
         dataset = self.get(dataset_id_or_name)
         if dataset is None:
@@ -470,6 +484,7 @@ class DatasetCatalog:
         return self.get(dataset["id"])
 
     def _build_row(self, dataset_id: str, name: str) -> dict[str, Any]:
+        """Build a catalog row from Starlet metadata and summary files."""
         dataset_dir = self.datasets_dir / name
         metadata = starlet.get_dataset_metadata(dataset_dir)
         summary = starlet.get_dataset_summary(dataset_dir) or {}
@@ -520,6 +535,7 @@ class DatasetCatalog:
 
     @staticmethod
     def _upsert(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+        """Insert or update one dataset row while preserving source fields when possible."""
         conn.execute(
             """
             INSERT INTO datasets (
@@ -591,6 +607,7 @@ class DatasetCatalog:
 
 
 def decode_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Convert a SQLite row into the API-facing dataset dictionary shape."""
     result = dict(row)
     for key in (
         "geometry_types",
@@ -629,12 +646,13 @@ def decode_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _schema_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract catalog schema entries from Starlet summary attributes and geometry."""
     schema: list[dict[str, Any]] = []
     for attr in summary.get("attributes") or []:
         schema.append(
             {
                 "name": attr.get("name"),
-                "type": attr.get("type") or attr.get("role"),
+                "type": normalize_schema_type(attr.get("type") or attr.get("role")),
                 "description": attr.get("description"),
             }
         )
@@ -650,18 +668,44 @@ def _schema_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return schema
 
 
+def normalize_schema_type(value: Any) -> Any:
+    """Convert source-specific schema type names into consistent display values."""
+    if not isinstance(value, str) or not value:
+        return value
+    type_name = value.removeprefix("esriFieldType")
+    if type_name == value:
+        return value
+    return {
+        "OID": "OID",
+        "GlobalID": "GlobalID",
+        "GUID": "GUID",
+        "SmallInteger": "Integer",
+        "Integer": "Integer",
+        "Single": "Float",
+        "Double": "Double",
+        "String": "String",
+        "Date": "Date",
+        "Blob": "Blob",
+        "Raster": "Raster",
+        "Geometry": "Geometry",
+        "XML": "XML",
+    }.get(type_name, type_name)
+
+
 def ensure_column(
     conn: sqlite3.Connection,
     table: str,
     column: str,
     column_type: str,
 ) -> None:
+    """Add a SQLite column during lightweight migrations when it is missing."""
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 
 def matches_filters(dataset: dict[str, Any], filters: dict[str, str]) -> bool:
+    """Check whether an in-memory dataset row satisfies REST query filters."""
     if filters.get("name") and filters["name"].lower() not in dataset["name"].lower():
         return False
     if filters.get("description"):
@@ -683,6 +727,7 @@ def matches_filters(dataset: dict[str, Any], filters: dict[str, str]) -> bool:
 
 
 def cosine_distance(left: list[float], right: list[float]) -> float:
+    """Return cosine distance between two embedding vectors."""
     if not left or not right or len(left) != len(right):
         return 1.0
     dot = sum(a * b for a, b in zip(left, right))
@@ -694,11 +739,13 @@ def cosine_distance(left: list[float], right: list[float]) -> float:
 
 
 def split_embedding_key(key: str) -> tuple[str, str]:
+    """Split a provider:model embedding key into database columns."""
     provider, _, model = key.partition(":")
     return provider, model
 
 
 def safe_enrichment(llm: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """Run LLM enrichment and optionally fall back to no updates on failure."""
     try:
         return llm.enrich_dataset(payload) or {}
     except Exception:
@@ -716,6 +763,7 @@ def merge_attribute_descriptions(
     schema: list[dict[str, Any]],
     descriptions: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    """Merge generated attribute descriptions into existing schema entries."""
     merged = []
     for field in schema:
         updated = dict(field)
@@ -730,6 +778,7 @@ def merge_attribute_descriptions(
 
 
 def normalize_style(style: Any, geometry_types: list[str] | None) -> dict[str, Any]:
+    """Merge a partial/generated style with the default style for the geometry."""
     base = fallback_style(geometry_types)
     if not isinstance(style, dict):
         return base
@@ -742,6 +791,7 @@ def normalize_style(style: Any, geometry_types: list[str] | None) -> dict[str, A
 
 
 def normalize_layer_paint(layer_style: Any, layer_type: str) -> dict[str, Any]:
+    """Flatten and filter paint properties for a single MapLibre layer type."""
     if not isinstance(layer_style, dict):
         return {}
 
@@ -759,6 +809,7 @@ def normalize_layer_paint(layer_style: Any, layer_type: str) -> dict[str, Any]:
 
 
 def is_supported_paint_property(key: Any, value: Any, layer_type: str) -> bool:
+    """Return whether a generated paint property is safe to keep."""
     return (
         isinstance(key, str)
         and key.startswith(f"{layer_type}-")
@@ -767,6 +818,7 @@ def is_supported_paint_property(key: Any, value: Any, layer_type: str) -> bool:
 
 
 def enrichment_payload(dataset: dict[str, Any]) -> dict[str, Any]:
+    """Build the compact dataset payload sent to the LLM enrichment step."""
     summary = dataset.get("summary_json") or {}
     return {
         "id": dataset.get("id"),
@@ -786,6 +838,7 @@ def enrichment_payload(dataset: dict[str, Any]) -> dict[str, Any]:
 
 
 def embedding_text(dataset: dict[str, Any]) -> str:
+    """Build the searchable text used to generate a dataset embedding."""
     schema_parts = []
     for field in dataset.get("schema") or []:
         schema_parts.append(
