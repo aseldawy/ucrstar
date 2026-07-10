@@ -825,6 +825,20 @@ function resetToDefaultStyle() {
   } catch(e) {}
 }
 
+function resetStyleToServerDefault() {
+  if (!map || !currentDatasetInfo) return;
+  if (attributeSelect) attributeSelect.value = '';
+  if (labelSelect) labelSelect.value = '';
+  if (document.getElementById('vizType')) document.getElementById('vizType').value = 'choropleth';
+  if (document.getElementById('colorScheme')) document.getElementById('colorScheme').value = 'blues';
+  if (document.getElementById('labelSize')) document.getElementById('labelSize').value = '12';
+  if (document.getElementById('labelColor')) document.getElementById('labelColor').value = '#202124';
+  if (document.getElementById('labelMinZoom')) document.getElementById('labelMinZoom').value = '13';
+  if (document.getElementById('labelBg')) document.getElementById('labelBg').value = 'white';
+  resetToDefaultStyle();
+  resetLegend();
+}
+
 function resetLegend() {
   if (legendEl) {
     legendEl.classList.remove('visible');
@@ -1135,6 +1149,7 @@ window.clearFilters = function(){
 };
 window.toggleStylePanel = toggleStylePanel;
 window.applyStyle = applyStyle;
+window.resetStyleToServerDefault = resetStyleToServerDefault;
 window.downloadDataset = downloadDataset;
 
 function fetchJson(url) {

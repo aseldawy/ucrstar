@@ -407,7 +407,7 @@ html, body {
 .style-panel {
   position: absolute;
   top: 130px;
-  right: 16px;
+  right: 72px;
   z-index: 1000;
   background: var(--bg-panel);
   border: 1px solid var(--border-mid);
@@ -521,6 +521,30 @@ input[type="color"].style-input {
   opacity: 0.9;
   box-shadow: 0 4px 16px var(--accent-glow);
   transform: translateY(-1px);
+}
+
+.style-reset-btn {
+  width: 100%;
+  padding: 8px 9px;
+  margin-top: 2px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.style-reset-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--bg-elevated);
 }
 
 .legend {
