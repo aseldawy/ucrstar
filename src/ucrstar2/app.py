@@ -40,6 +40,10 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     )
     if config:
         app.config.update(config)
+    app.extensions["ucrstar2_catalog"] = DatasetCatalog(
+        Path(app.config["DATABASE"]),
+        Path(app.config["DATASETS_DIR"]),
+    )
 
     @app.get("/")
     def index() -> Response:
@@ -55,7 +59,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/datasets.json")
     def datasets() -> Response:
-        catalog().sync()
         filters = {
             key: value
             for key, value in request.args.items()
@@ -91,7 +94,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/datasets/<dataset_ref>.json")
     def dataset_details(dataset_ref: str) -> Response:
-        catalog().sync()
         dataset = catalog().get(dataset_ref)
         if dataset is None:
             return jsonify({"error": "dataset not found"}), 404
@@ -99,7 +101,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/datasets/<dataset_ref>/style.json")
     def dataset_style(dataset_ref: str) -> Response:
-        catalog().sync()
         style = catalog().style(dataset_ref)
         if style is None:
             return jsonify({"error": "dataset not found"}), 404
@@ -107,7 +108,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/datasets/<dataset_ref>/histogram.png")
     def dataset_histogram(dataset_ref: str) -> Response:
-        catalog().sync()
         dataset = require_dataset(dataset_ref)
         if isinstance(dataset, Response):
             return dataset
@@ -129,7 +129,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.route("/datasets/<dataset_ref>/download.<fmt>", methods=["GET", "POST"])
     def download(dataset_ref: str, fmt: str) -> Response:
-        catalog().sync()
         dataset = require_dataset(dataset_ref)
         if isinstance(dataset, Response):
             return dataset
@@ -163,7 +162,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/datasets/<dataset_ref>/sample.<fmt>")
     def sample(dataset_ref: str, fmt: str) -> Response:
-        catalog().sync()
         dataset = require_dataset(dataset_ref)
         if isinstance(dataset, Response):
             return dataset
@@ -182,12 +180,14 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/datasets/<dataset_ref>/tiles/<int:z>/<int:x>/<int:y>.mvt")
     def tile(dataset_ref: str, z: int, x: int, y: int) -> Response:
-        catalog().sync()
         dataset = require_dataset(dataset_ref)
         if isinstance(dataset, Response):
             return dataset
         data = starlet.get_tile(dataset_path(dataset["name"]), z, x, y)
         return Response(data, mimetype="application/vnd.mapbox-vector-tile")
+
+    with app.app_context():
+        catalog().sync()
 
     @app.get("/<path:filename>")
     def debug_static_file(filename: str) -> Response:
@@ -207,10 +207,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
 
 def catalog() -> DatasetCatalog:
-    return DatasetCatalog(
-        Path(current_app.config["DATABASE"]),
-        Path(current_app.config["DATASETS_DIR"]),
-    )
+    return current_app.extensions["ucrstar2_catalog"]
 
 
 def llm_client() -> Any:
