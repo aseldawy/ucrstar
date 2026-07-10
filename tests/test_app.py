@@ -191,6 +191,38 @@ def test_frontend_index_is_served(tmp_path: Path) -> None:
     assert b"/static/app.js" in response.data
 
 
+def test_debug_static_fallback_serves_alternate_mvt_frontend(tmp_path: Path) -> None:
+    app = create_app(
+        {
+            "TESTING": True,
+            "DEBUG": True,
+            "DATASETS_DIR": tmp_path / "datasets",
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+        }
+    )
+
+    response = app.test_client().get("/view_mvt.html")
+
+    assert response.status_code == 200
+    assert b"/static/view_mvt.css" in response.data
+    assert b"/static/view_mvt.js" in response.data
+
+
+def test_static_fallback_is_debug_only(tmp_path: Path) -> None:
+    app = create_app(
+        {
+            "TESTING": True,
+            "DEBUG": False,
+            "DATASETS_DIR": tmp_path / "datasets",
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+        }
+    )
+
+    response = app.test_client().get("/view_mvt.html")
+
+    assert response.status_code == 404
+
+
 def test_histogram_png_endpoint(tmp_path: Path, monkeypatch) -> None:
     datasets_dir = tmp_path / "datasets"
     histogram_dir = datasets_dir / "counties" / "histograms"

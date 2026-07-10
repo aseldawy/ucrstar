@@ -13,6 +13,7 @@ import starlet
 from flask import (
     Flask,
     Response,
+    abort,
     current_app,
     jsonify,
     request,
@@ -186,6 +187,20 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             return dataset
         data = starlet.get_tile(dataset_path(dataset["name"]), z, x, y)
         return Response(data, mimetype="application/vnd.mapbox-vector-tile")
+
+    @app.get("/<path:filename>")
+    def debug_static_file(filename: str) -> Response:
+        if not current_app.debug:
+            abort(404)
+        static_root = Path(app.static_folder).resolve()
+        static_path = (static_root / filename).resolve()
+        try:
+            static_path.relative_to(static_root)
+        except ValueError:
+            abort(404)
+        if not static_path.is_file():
+            abort(404)
+        return send_from_directory(app.static_folder, filename)
 
     return app
 
