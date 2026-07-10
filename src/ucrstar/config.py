@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_CONFIG_PATH = Path("ucrstar2.config.json")
+DEFAULT_CONFIG_PATH = Path("ucrstar.config.json")
 
 
 DEFAULT_CONFIG: dict[str, Any] = {

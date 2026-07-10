@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ucrstar2.esri_hub import EsriHubClient, HubDataset, split_record_id
+from ucrstar.esri_hub import EsriHubClient, HubDataset, split_record_id
 
 
 def test_split_record_id() -> None:

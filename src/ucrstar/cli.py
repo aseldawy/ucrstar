@@ -23,19 +23,19 @@ if __package__:
     from .sources import clean_html, current_source_state, source_reference, prepare_input_source, utc_now_iso
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from ucrstar2.app import create_app
-    from ucrstar2.catalog import DatasetCatalog
-    from ucrstar2.config import load_config
-    from ucrstar2.esri_hub import EsriHubClient, HubDataset
-    from ucrstar2.llm import llm_from_config
-    from ucrstar2.sources import clean_html, current_source_state, source_reference, prepare_input_source, utc_now_iso
+    from ucrstar.app import create_app
+    from ucrstar.catalog import DatasetCatalog
+    from ucrstar.config import load_config
+    from ucrstar.esri_hub import EsriHubClient, HubDataset
+    from ucrstar.llm import llm_from_config
+    from ucrstar.sources import clean_html, current_source_state, source_reference, prepare_input_source, utc_now_iso
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="ucrstar2")
+    parser = argparse.ArgumentParser(prog="ucrstar")
     parser.add_argument("--datasets-dir", default="datasets")
-    parser.add_argument("--database", default="instance/ucrstar2.sqlite")
-    parser.add_argument("--config", default="ucrstar2.config.json")
+    parser.add_argument("--database", default="instance/ucrstar.sqlite")
+    parser.add_argument("--config", default="ucrstar.config.json")
     parser.add_argument("--log-level", default="INFO")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

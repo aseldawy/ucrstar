@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ucrstar2.app import create_app
+from ucrstar.app import create_app
 
 
 def test_datasets_endpoint_uses_catalog(tmp_path: Path, monkeypatch) -> None:
@@ -61,7 +61,7 @@ def test_datasets_endpoint_defaults_to_published_state(tmp_path: Path) -> None:
         }
     )
     catalog = app.config["DATABASE"]
-    from ucrstar2.catalog import DatasetCatalog
+    from ucrstar.catalog import DatasetCatalog
 
     DatasetCatalog(catalog, datasets_dir).register_source(
         "queued",

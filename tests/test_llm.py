@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from ucrstar2 import llm as llm_module
-from ucrstar2.llm import GeminiClient, LLMConfig, llm_from_config, resolve_integrated_model, ssl_context
+from ucrstar import llm as llm_module
+from ucrstar.llm import GeminiClient, LLMConfig, llm_from_config, resolve_integrated_model, ssl_context
 
 
 def test_integrated_builtin_enriches_without_external_server() -> None:
@@ -105,7 +105,7 @@ def test_gemini_embedding_uses_current_model_and_header(monkeypatch) -> None:
         calls["headers"] = headers
         return {"embedding": {"values": [0.1, 0.2]}}
 
-    monkeypatch.setattr("ucrstar2.llm.post_json", fake_post_json)
+    monkeypatch.setattr("ucrstar.llm.post_json", fake_post_json)
     client = GeminiClient(
         LLMConfig(
             enabled=True,

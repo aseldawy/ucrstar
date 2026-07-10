@@ -274,7 +274,7 @@ class EsriHubClient:
     def get_json(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request = urllib.request.Request(
             self.url(url, params),
-            headers={"User-Agent": "ucrstar2/0.1"},
+            headers={"User-Agent": "ucrstar/0.1"},
         )
         with urllib.request.urlopen(request, timeout=self.timeout, context=ssl_context()) as response:
             return json.loads(response.read().decode("utf-8"))

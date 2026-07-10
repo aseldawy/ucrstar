@@ -34,13 +34,13 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     app = Flask(__name__)
     app.config.from_mapping(
         DATASETS_DIR=Path("datasets"),
-        DATABASE=Path("instance/ucrstar2.sqlite"),
+        DATABASE=Path("instance/ucrstar.sqlite"),
         QUERY_BATCH_SIZE=DEFAULT_BATCH_SIZE,
         UCRSTAR2_CONFIG=load_config(),
     )
     if config:
         app.config.update(config)
-    app.extensions["ucrstar2_catalog"] = DatasetCatalog(
+    app.extensions["ucrstar_catalog"] = DatasetCatalog(
         Path(app.config["DATABASE"]),
         Path(app.config["DATASETS_DIR"]),
     )
@@ -207,7 +207,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
 
 def catalog() -> DatasetCatalog:
-    return current_app.extensions["ucrstar2_catalog"]
+    return current_app.extensions["ucrstar_catalog"]
 
 
 def llm_client() -> Any:

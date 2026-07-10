@@ -142,7 +142,7 @@ def prepare_remote_source(url: str) -> PreparedSource:
 
 def prepare_arcgis_item_data(item: dict[str, Any], *, original_url: str) -> PreparedSource:
     item_id = item["id"]
-    tempdir = tempfile.TemporaryDirectory(prefix="ucrstar2-arcgis-item-")
+    tempdir = tempfile.TemporaryDirectory(prefix="ucrstar-arcgis-item-")
     filename = safe_filename(item.get("name")) or filename_for_arcgis_item(item)
     downloaded_path = Path(tempdir.name) / filename
     data_url = f"https://www.arcgis.com/sharing/rest/content/items/{item_id}/data"
@@ -177,7 +177,7 @@ def prepare_arcgis_item_data(item: dict[str, Any], *, original_url: str) -> Prep
 
 
 def prepare_remote_file(url: str) -> PreparedSource:
-    tempdir = tempfile.TemporaryDirectory(prefix="ucrstar2-source-")
+    tempdir = tempfile.TemporaryDirectory(prefix="ucrstar-source-")
     headers = head_url(url)
     filename = filename_from_url_or_headers(url, headers)
     target = Path(tempdir.name) / filename
@@ -208,7 +208,7 @@ def prepare_arcgis_service(
 ) -> PreparedSource:
     layer_url = resolve_arcgis_layer_url(service_url)
     layer = fetch_json(layer_url, {"f": "json"})
-    tempdir = tempfile.TemporaryDirectory(prefix="ucrstar2-esri-")
+    tempdir = tempfile.TemporaryDirectory(prefix="ucrstar-esri-")
     safe_name = safe_filename(item.get("title") if item else layer.get("name")) or "esri_dataset"
     target = Path(tempdir.name) / f"{safe_name}.geojson"
     LOGGER.info("Exporting Esri layer %s to %s", layer_url, target)
@@ -478,7 +478,7 @@ def fetch_json(url: str, params: dict[str, Any] | None = None, *, method: str = 
     request = urllib.request.Request(
         request_url,
         data=body,
-        headers={"User-Agent": "ucrstar2/0.1"},
+        headers={"User-Agent": "ucrstar/0.1"},
         method=method,
     )
     with urllib.request.urlopen(request, timeout=120, context=ssl_context()) as response:
@@ -486,7 +486,7 @@ def fetch_json(url: str, params: dict[str, Any] | None = None, *, method: str = 
 
 
 def download_url(url: str, target: Path) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": "ucrstar2/0.1"})
+    request = urllib.request.Request(url, headers={"User-Agent": "ucrstar/0.1"})
     with urllib.request.urlopen(request, timeout=120, context=ssl_context()) as response:
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("wb") as output:
@@ -498,12 +498,12 @@ def download_url(url: str, target: Path) -> None:
 
 
 def head_url(url: str) -> dict[str, str]:
-    request = urllib.request.Request(url, headers={"User-Agent": "ucrstar2/0.1"}, method="HEAD")
+    request = urllib.request.Request(url, headers={"User-Agent": "ucrstar/0.1"}, method="HEAD")
     try:
         with urllib.request.urlopen(request, timeout=30, context=ssl_context()) as response:
             return dict(response.headers.items())
     except urllib.error.HTTPError:
-        request = urllib.request.Request(url, headers={"User-Agent": "ucrstar2/0.1"})
+        request = urllib.request.Request(url, headers={"User-Agent": "ucrstar/0.1"})
         with urllib.request.urlopen(request, timeout=30, context=ssl_context()) as response:
             return dict(response.headers.items())
 

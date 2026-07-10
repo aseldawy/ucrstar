@@ -2,9 +2,9 @@ import logging
 import tempfile
 from pathlib import Path
 
-from ucrstar2 import cli
-from ucrstar2.esri_hub import HubDataset
-from ucrstar2.sources import PreparedSource
+from ucrstar import cli
+from ucrstar.esri_hub import HubDataset
+from ucrstar.sources import PreparedSource
 
 
 def test_add_dataset_builds_and_catalogs_dataset(
@@ -52,7 +52,7 @@ def test_add_dataset_builds_and_catalogs_dataset(
     monkeypatch.setattr(
         "sys.argv",
         [
-            "ucrstar2",
+            "ucrstar",
             "--datasets-dir",
             str(datasets_dir),
             "--database",
@@ -103,7 +103,7 @@ def test_add_dataset_create_only_registers_source_without_building(
     monkeypatch.setattr(
         "sys.argv",
         [
-            "ucrstar2",
+            "ucrstar",
             "--datasets-dir",
             str(datasets_dir),
             "--database",
@@ -153,7 +153,7 @@ def test_add_dataset_create_only_registers_remote_source_timestamp(
     monkeypatch.setattr(
         "sys.argv",
         [
-            "ucrstar2",
+            "ucrstar",
             "--datasets-dir",
             str(datasets_dir),
             "--database",
@@ -249,7 +249,7 @@ def test_add_dataset_create_only_registers_esri_hub_repository(
     monkeypatch.setattr(
         "sys.argv",
         [
-            "ucrstar2",
+            "ucrstar",
             "--datasets-dir",
             str(datasets_dir),
             "--database",
@@ -335,7 +335,7 @@ def test_process_dataset_processes_created_dataset(
     monkeypatch.setattr(
         "sys.argv",
         [
-            "ucrstar2",
+            "ucrstar",
             "--datasets-dir",
             str(datasets_dir),
             "--database",
@@ -367,7 +367,7 @@ def test_process_dataset_downloads_remote_source_to_temporary_path(
     url = "https://example.com/data/roads.geojson"
 
     def fake_prepare_input_source(value):
-        tempdir = tempfile.TemporaryDirectory(prefix="ucrstar2-test-")
+        tempdir = tempfile.TemporaryDirectory(prefix="ucrstar-test-")
         downloaded = Path(tempdir.name) / "roads.geojson"
         downloaded.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
         return PreparedSource(
@@ -386,7 +386,7 @@ def test_process_dataset_downloads_remote_source_to_temporary_path(
         calls["input_arg"] = input_arg
         calls["name"] = kwargs["name"]
         assert Path(input_arg).exists()
-        assert Path(input_arg).parent.name.startswith("ucrstar2-test-")
+        assert Path(input_arg).parent.name.startswith("ucrstar-test-")
         (Path(datasets_arg) / kwargs["name"]).mkdir(parents=True)
         return None, None, None
 
@@ -434,7 +434,7 @@ def test_process_dataset_downloads_remote_source_to_temporary_path(
     monkeypatch.setattr(
         "sys.argv",
         [
-            "ucrstar2",
+            "ucrstar",
             "--datasets-dir",
             str(datasets_dir),
             "--database",
@@ -503,7 +503,7 @@ def test_delete_dataset_removes_folder_and_catalog_entry(
     monkeypatch.setattr(
         "sys.argv",
         [
-            "ucrstar2",
+            "ucrstar",
             "--datasets-dir",
             str(datasets_dir),
             "--database",
@@ -596,7 +596,7 @@ def test_refresh_rebuilds_newer_source_under_temporary_name(
     monkeypatch.setattr(
         "sys.argv",
         [
-            "ucrstar2",
+            "ucrstar",
             "--datasets-dir",
             str(datasets_dir),
             "--database",

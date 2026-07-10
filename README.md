@@ -1,4 +1,4 @@
-# UCR Star 2
+# UCR Star
 
 Flask backend for serving and exploring geospatial datasets built by
 [`starlet`](starlet_api.md).
@@ -9,8 +9,8 @@ Flask backend for serving and exploring geospatial datasets built by
 datasets/
   <dataset-name>/
 instance/
-  ucrstar2.sqlite
-src/ucrstar2/
+  ucrstar.sqlite
+src/ucrstar/
 ```
 
 Each dataset gets a stable UUID in the embedded SQLite catalog. The catalog
@@ -19,7 +19,7 @@ stores the dataset subdirectory name plus summary fields used by the REST API.
 ## Run
 
 ```bash
-.venv/bin/python src/ucrstar2/cli.py serve --debug
+.venv/bin/python src/ucrstar/cli.py serve --debug
 ```
 
 The SQLite catalog is created lazily the first time the server needs it. No
@@ -46,10 +46,10 @@ CLI commands log progress to the console at `INFO` level by default. Use
 ## Add Datasets
 
 ```bash
-.venv/bin/python src/ucrstar2/cli.py add-dataset path/to/source.geojson --name roads
-.venv/bin/python src/ucrstar2/cli.py add-dataset https://example.com/data/roads.geojson --name roads
-.venv/bin/python src/ucrstar2/cli.py add-dataset path/to/source.geojson --name roads --create-only
-.venv/bin/python src/ucrstar2/cli.py add-dataset https://egis-lacounty.hub.arcgis.com/search --create-only
+.venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads
+.venv/bin/python src/ucrstar/cli.py add-dataset https://example.com/data/roads.geojson --name roads
+.venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads --create-only
+.venv/bin/python src/ucrstar/cli.py add-dataset https://egis-lacounty.hub.arcgis.com/search --create-only
 ```
 
 The input can be a local path, a direct public download URL, an ArcGIS item URL,
@@ -58,7 +58,7 @@ FeatureServer layer URL. Local paths are processed directly. Direct public URLs
 are downloaded to a temporary directory and then passed to Starlet:
 
 ```bash
-.venv/bin/python src/ucrstar2/cli.py add-dataset \
+.venv/bin/python src/ucrstar/cli.py add-dataset \
   "https://hub.arcgis.com/datasets/example::roads/about" \
   --name roads
 ```
@@ -90,9 +90,9 @@ name.
 To process created datasets later:
 
 ```bash
-.venv/bin/python src/ucrstar2/cli.py process-dataset
-.venv/bin/python src/ucrstar2/cli.py process-dataset --limit 10
-.venv/bin/python src/ucrstar2/cli.py process-dataset roads
+.venv/bin/python src/ucrstar/cli.py process-dataset
+.venv/bin/python src/ucrstar/cli.py process-dataset --limit 10
+.venv/bin/python src/ucrstar/cli.py process-dataset roads
 ```
 
 Datasets move through `created`, `downloaded`, `processed`, `ready`, and
@@ -119,10 +119,10 @@ If LLM support is enabled, `add-dataset` also enriches the catalog entry:
 ## Refresh Datasets
 
 ```bash
-.venv/bin/python src/ucrstar2/cli.py refresh
-.venv/bin/python src/ucrstar2/cli.py refresh-datasets
-.venv/bin/python src/ucrstar2/cli.py refresh roads
-.venv/bin/python src/ucrstar2/cli.py refresh roads --force
+.venv/bin/python src/ucrstar/cli.py refresh
+.venv/bin/python src/ucrstar/cli.py refresh-datasets
+.venv/bin/python src/ucrstar/cli.py refresh roads
+.venv/bin/python src/ucrstar/cli.py refresh roads --force
 ```
 
 `refresh` checks source-backed datasets and rebuilds only those whose source has
@@ -140,7 +140,7 @@ even when the timestamp does not show a newer source.
 ## Delete Datasets
 
 ```bash
-.venv/bin/python src/ucrstar2/cli.py delete-dataset roads
+.venv/bin/python src/ucrstar/cli.py delete-dataset roads
 ```
 
 `delete-dataset` accepts either a dataset ID or dataset name. It deletes the
@@ -153,10 +153,10 @@ removes the dataset row and associated embeddings from the SQLite catalog. Use
 Copy the template and edit the copy:
 
 ```bash
-cp ucrstar2.config.template.json ucrstar2.config.json
+cp ucrstar.config.template.json ucrstar.config.json
 ```
 
-`ucrstar2.config.json` is ignored by Git because it may contain API keys. The
+`ucrstar.config.json` is ignored by Git because it may contain API keys. The
 template supports these providers:
 
 - `openai`
@@ -266,7 +266,7 @@ If you later install the project in editable mode, the module form also works:
 
 ```bash
 .venv/bin/python -m pip install -e .
-.venv/bin/python -m ucrstar2.cli serve --debug
+.venv/bin/python -m ucrstar.cli serve --debug
 ```
 
 ## REST URLs

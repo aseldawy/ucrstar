@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ucrstar2.catalog import DatasetCatalog, normalize_schema_type, normalize_style
+from ucrstar.catalog import DatasetCatalog, normalize_schema_type, normalize_style
 
 
 def test_catalog_sync_keeps_stable_id(tmp_path: Path, monkeypatch) -> None:

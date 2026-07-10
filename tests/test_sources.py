@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ucrstar2 import sources
+from ucrstar import sources
 
 
 def test_esri_attribute_metadata_normalizes_types_and_keeps_originals() -> None:
