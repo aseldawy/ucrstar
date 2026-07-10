@@ -415,7 +415,7 @@ function showFeaturePopup(properties, lngLat, geojsonUrl) {
 
   var title = document.createElement('span');
   title.className = 'popup-title';
-  title.textContent = 'Feature Properties';
+  title.textContent = 'Feature';
   header.appendChild(title);
 
   var searchWrap = document.createElement('div');
