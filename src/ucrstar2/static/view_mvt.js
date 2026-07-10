@@ -20,12 +20,15 @@ var map, currentDataset = null, currentDatasetInfo = null, allDatasets = [];
 var currentGeometryType = null;
 var currentAttributes = [];
 var activePopup = null;
+var activePopupState = null;
 var urlUpdateTimer = null;
 var quickTimer = null;
 var sourceLayer = SOURCE_LAYER;
 var activeDatasetStyle = clone(FALLBACK_STYLE);
 var isApplyingUrl = false;
 var skipNextUrlUpdate = false;
+var basemapMode = 'street';
+var currentDatasetBounds = null;
 
 var searchForm = document.getElementById('searchForm');
 var searchInput = document.getElementById('searchInput');
@@ -42,26 +45,36 @@ var attributeSelect = document.getElementById('attributeSelect');
 var labelSelect = document.getElementById('labelSelect');
 var legendEl = document.getElementById('legend');
 var legendContentEl = document.getElementById('legendContent');
+var baseLayerBtn = document.getElementById('baseLayerBtn');
+var zoomAllBtn = document.getElementById('zoomAllBtn');
 
 function initMap(center, zoom) {
   map = new maplibregl.Map({
     container:'map',
     style:{
       version:8,
-      sources:{basemap:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,attribution:'OpenStreetMap'}},
-      layers:[{id:'basemap',type:'raster',source:'basemap'}]
+      sources:{
+        basemap_street:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,attribution:'OpenStreetMap'},
+        basemap_satellite:{type:'raster',tiles:['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],tileSize:256,attribution:'Esri'}
+      },
+      layers:[
+        {id:'basemap-street',type:'raster',source:'basemap_street',paint:{'raster-opacity':0.5}},
+        {id:'basemap-satellite',type:'raster',source:'basemap_satellite',paint:{'raster-opacity':0}}
+      ]
     },
     center:center || [-98,39],
     zoom:zoom || 4
   });
   ensureLabelCanvas();
   attachMapEvents();
+  updateBasemapMode();
 }
 
 function attachMapEvents() {
   map.on('moveend', scheduleUrlUpdate);
   map.on('zoomend', scheduleUrlUpdate);
   map.on('click', handleMapClick);
+  map.on('load', updateBasemapMode);
 }
 
 function waitForMapLoad() {
@@ -88,6 +101,8 @@ searchForm.addEventListener('submit', function(e){
 closePanel.addEventListener('click', hidePanel);
 clearSearch.addEventListener('click', clearSearchAndResults);
 backToResults.addEventListener('click', showLastSearchResults);
+baseLayerBtn.addEventListener('click', toggleBasemap);
+zoomAllBtn.addEventListener('click', zoomToDataset);
 
 window.addEventListener('popstate', function(){
   applyUrlState();
@@ -242,10 +257,12 @@ async function loadMapDataset(dataset, options) {
   var hasPolygon = geomText.indexOf('POLYGON') !== -1;
   var typeCount = (hasPoint?1:0) + (hasLine?1:0) + (hasPolygon?1:0);
   currentGeometryType = typeCount === 1 ? (hasPoint ? 'point' : hasLine ? 'line' : 'polygon') : null;
+  currentDatasetBounds = Array.isArray(dataset.mbr) && dataset.mbr.length === 4 ? dataset.mbr.slice() : null;
 
   if (options.fitBounds && Array.isArray(dataset.mbr) && dataset.mbr.length === 4) {
     map.fitBounds([[dataset.mbr[0], dataset.mbr[1]], [dataset.mbr[2], dataset.mbr[3]]], {padding:70, maxZoom:12, duration:600});
   }
+  updateZoomAllState();
 }
 
 async function fetchDatasetStyle(dataset) {
@@ -307,6 +324,32 @@ function clearDatasetLayer() {
   map._cursorBound = {};
 }
 
+function updateBasemapMode() {
+  if (!map || !map.getLayer('basemap-street') || !map.getLayer('basemap-satellite')) return;
+  map.setLayoutProperty('basemap-street', 'visibility', basemapMode === 'street' ? 'visible' : 'none');
+  map.setLayoutProperty('basemap-satellite', 'visibility', basemapMode === 'satellite' ? 'visible' : 'none');
+  map.setPaintProperty('basemap-street', 'raster-opacity', basemapMode === 'street' ? 0.5 : 0);
+  map.setPaintProperty('basemap-satellite', 'raster-opacity', basemapMode === 'satellite' ? 0.9 : 0);
+  if (baseLayerBtn) baseLayerBtn.textContent = basemapMode === 'street' ? '🗺' : '🛰';
+}
+
+function toggleBasemap() {
+  basemapMode = basemapMode === 'street' ? 'satellite' : 'street';
+  updateBasemapMode();
+}
+
+function zoomToDataset() {
+  if (!map || !currentDatasetBounds) return;
+  map.fitBounds(
+    [[currentDatasetBounds[0], currentDatasetBounds[1]], [currentDatasetBounds[2], currentDatasetBounds[3]]],
+    {padding:70, maxZoom:13, duration:600}
+  );
+}
+
+function updateZoomAllState() {
+  if (zoomAllBtn) zoomAllBtn.disabled = !currentDatasetBounds;
+}
+
 function attachClickableCursors() {
   CLICKABLE_LAYERS.forEach(function(layerId){
     if (!map.getLayer(layerId) || map._cursorBound && map._cursorBound[layerId]) return;
@@ -358,12 +401,135 @@ function showFeaturePopup(properties, lngLat, geojsonUrl) {
   var rows = Object.keys(properties).filter(function(key){
     return key !== 'geometry' && key.indexOf('_') !== 0;
   }).map(function(key){
-    return '<div class="popup-row"><span class="popup-key" title="'+escapeHtml(key)+'">'+escapeHtml(key)+'</span><span class="popup-val">'+escapeHtml(formatValue(properties[key]))+'</span></div>';
-  }).join('');
-  var download = geojsonUrl ? '<a class="popup-download" href="'+escapeHtml(geojsonUrl)+'" target="_blank" rel="noopener" title="Download GeoJSON">&#8681;</a>' : '<span class="popup-count">'+Object.keys(properties).length+'</span>';
-  var html = '<div class="popup-header"><span>Feature Properties</span>'+download+'</div><div class="popup-body">'+rows+'</div>';
+    return {
+      key: key,
+      value: properties[key],
+      text: String(key) + ' ' + String(formatValue(properties[key]))
+    };
+  });
+  var container = document.createElement('div');
+  container.className = 'popup-shell';
+
+  var header = document.createElement('div');
+  header.className = 'popup-header';
+
+  var title = document.createElement('span');
+  title.className = 'popup-title';
+  title.textContent = 'Feature Properties';
+  header.appendChild(title);
+
+  var searchWrap = document.createElement('div');
+  searchWrap.className = 'popup-search-wrap';
+
+  var search = document.createElement('input');
+  search.className = 'popup-search';
+  search.type = 'text';
+  search.placeholder = 'Filter fields';
+  search.autocomplete = 'off';
+  search.spellcheck = false;
+  searchWrap.appendChild(search);
+
+  var regexBtn = document.createElement('button');
+  regexBtn.type = 'button';
+  regexBtn.className = 'popup-regex-btn';
+  regexBtn.title = 'Toggle regex search';
+  regexBtn.setAttribute('aria-pressed', 'false');
+  regexBtn.textContent = '.*';
+  searchWrap.appendChild(regexBtn);
+
+  header.appendChild(searchWrap);
+
+  var actions = document.createElement('span');
+  actions.className = 'popup-header-actions';
+  if (geojsonUrl) {
+    var download = document.createElement('a');
+    download.className = 'popup-download';
+    download.href = geojsonUrl;
+    download.target = '_blank';
+    download.rel = 'noopener';
+    download.title = 'Download GeoJSON';
+    download.textContent = '⇩';
+    actions.appendChild(download);
+  } else {
+    var count = document.createElement('span');
+    count.className = 'popup-count';
+    count.textContent = String(rows.length);
+    actions.appendChild(count);
+  }
+  header.appendChild(actions);
+  container.appendChild(header);
+
+  var body = document.createElement('div');
+  body.className = 'popup-body';
+  container.appendChild(body);
+
+  function renderRows() {
+    var query = search.value.trim();
+    var regexMode = regexBtn.getAttribute('aria-pressed') === 'true';
+    var filtered = rows;
+    var invalidRegex = false;
+    if (query) {
+      if (regexMode) {
+        try {
+          var re = new RegExp(query, 'i');
+          filtered = rows.filter(function(row){ return re.test(row.key) || re.test(String(formatValue(row.value))); });
+        } catch(error) {
+          invalidRegex = true;
+          filtered = [];
+        }
+      } else {
+        var needle = query.toLowerCase();
+        filtered = rows.filter(function(row){ return row.text.toLowerCase().indexOf(needle) !== -1; });
+      }
+    }
+    body.innerHTML = '';
+    if (invalidRegex) {
+      var hint = document.createElement('div');
+      hint.className = 'popup-empty-state';
+      hint.textContent = 'Invalid regex pattern';
+      body.appendChild(hint);
+      return;
+    }
+    if (!filtered.length) {
+      var empty = document.createElement('div');
+      empty.className = 'popup-empty-state';
+      empty.textContent = query ? 'No matching fields' : 'No visible fields';
+      body.appendChild(empty);
+      return;
+    }
+    filtered.forEach(function(row){
+      var item = document.createElement('div');
+      item.className = 'popup-row';
+
+      var key = document.createElement('span');
+      key.className = 'popup-key';
+      key.title = row.key;
+      key.textContent = row.key;
+      item.appendChild(key);
+
+      var val = document.createElement('span');
+      val.className = 'popup-val';
+      val.textContent = formatValue(row.value);
+      item.appendChild(val);
+
+      body.appendChild(item);
+    });
+  }
+
+  search.addEventListener('input', renderRows);
+  regexBtn.addEventListener('click', function(){
+    var pressed = regexBtn.getAttribute('aria-pressed') === 'true';
+    regexBtn.setAttribute('aria-pressed', String(!pressed));
+    regexBtn.classList.toggle('active', !pressed);
+    renderRows();
+    search.focus();
+  });
+
+  renderRows();
   if (activePopup) activePopup.remove();
-  activePopup = new maplibregl.Popup({maxWidth:'360px',closeButton:true}).setLngLat(lngLat).setHTML(html).addTo(map);
+  activePopupState = {search: search, regexBtn: regexBtn, body: body};
+  activePopup = new maplibregl.Popup({maxWidth:'420px',closeButton:true}).setLngLat(lngLat).setDOMContent(container).addTo(map);
+  activePopup.on('close', function(){ activePopupState = null; });
 }
 
 function renderDatasetDetails(dataset) {
@@ -958,10 +1124,12 @@ window.selectDataset = selectDataset;
 window.clearFilters = function(){
   currentDataset = null;
   currentDatasetInfo = null;
+  currentDatasetBounds = null;
   currentAttributes = [];
   clearDatasetLayer();
   resetLegend();
   clearSearchAndResults();
+  updateZoomAllState();
   updateUrl({history:'replace'});
 };
 window.toggleStylePanel = toggleStylePanel;

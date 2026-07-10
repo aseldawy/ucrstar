@@ -1180,18 +1180,19 @@ body.dark {
 
 .popup-header {
   display: flex;
-  justify-content: flex-start;
-  align-items: center;
-  gap: 10px;
-  padding-right: 34px;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px 8px 12px;
+  min-height: 46px;
 }
 
 .popup-header-actions {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-left: 4px;
-  margin-right: auto;
+  margin-left: auto;
+  flex-shrink: 0;
+  padding-top: 2px;
 }
 
 .popup-count {
@@ -1214,6 +1215,67 @@ body.dark {
   color: var(--accent);
   font-family: var(--font-mono);
   font-size: 11px;
+}
+
+.popup-shell {
+  display: flex;
+  flex-direction: column;
+}
+
+.popup-title {
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+
+.popup-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.popup-search {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(255,255,255,0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.14);
+  color: var(--bg-base);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  outline: none;
+}
+
+.popup-search::placeholder {
+  color: rgba(255,255,255,0.78);
+}
+
+.popup-regex-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255,255,255,0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.14);
+  color: var(--bg-base);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.popup-regex-btn.active {
+  background: rgba(255,255,255,0.28);
+  border-color: rgba(255,255,255,0.45);
+}
+
+.popup-empty-state {
+  padding: 10px 0 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
 /* FASE 6 - Selector de formato de descarga */
@@ -1641,15 +1703,18 @@ body.dark {
   color: var(--text-primary);
 }
 
-.popup-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
 .popup-download {
   color: var(--bg-base);
   font-size: 14px;
   line-height: 1;
+}
+
+.popup-header .popup-download {
+  color: var(--bg-base);
+  text-decoration: none;
+}
+
+.popup-header .popup-download:hover {
+  text-decoration: none;
+  opacity: 0.85;
 }
