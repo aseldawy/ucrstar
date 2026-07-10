@@ -38,7 +38,6 @@ var leftPanel = document.getElementById('leftPanel');
 var panelTitle = document.getElementById('panelTitle');
 var panelKicker = document.getElementById('panelKicker');
 var panelContent = document.getElementById('panelContent');
-var closePanel = document.getElementById('closePanel');
 var backToResults = document.getElementById('backToResults');
 var stylePanelEl = document.getElementById('stylePanel');
 var attributeSelect = document.getElementById('attributeSelect');
@@ -100,8 +99,7 @@ searchForm.addEventListener('submit', function(e){
   runSemanticSearch(searchInput.value.trim());
 });
 
-closePanel.addEventListener('click', hidePanel);
-clearSearch.addEventListener('click', clearSearchAndResults);
+clearSearch.addEventListener('click', function() {window.clearFilters();});
 backToResults.addEventListener('click', showLastSearchResults);
 baseLayerBtn.addEventListener('click', toggleBasemap);
 zoomAllBtn.addEventListener('click', zoomToDataset);
@@ -536,7 +534,7 @@ function showFeaturePopup(properties, lngLat, geojsonUrl) {
 
 function renderDatasetDetails(dataset) {
   panelKicker.textContent = 'Dataset';
-  panelTitle.textContent = dataset.name;
+  panelTitle.textContent = '';
   setDetailMode(lastSearchResults.length > 0);
   showPanel();
   var sourceHtml = renderSource(dataset.source);
@@ -1162,8 +1160,16 @@ window.clearFilters = function(){
   currentAttributes = [];
   clearDatasetLayer();
   resetLegend();
-  clearSearchAndResults();
   updateZoomAllState();
+  panelKicker.textContent = 'UCR★STAR';
+  panelTitle.textContent = '';
+  panelContent.innerHTML = '';
+  searchInput.value = '';
+  lastSearchQuery = '';
+  lastSearchResults = [];
+  hideQuickResults();
+  hidePanel();
+  updateSearchControls();
   updateUrl({history:'replace'});
 };
 window.toggleStylePanel = toggleStylePanel;

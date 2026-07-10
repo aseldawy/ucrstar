@@ -1362,7 +1362,6 @@ body.dark {
 .map-search {
   position: absolute;
   top: 16px;
-  left: 16px;
   z-index: 1500;
   width: var(--viewer-panel-width);
   height: 46px;
@@ -1382,6 +1381,24 @@ body.dark {
   padding: 0 14px;
   background-image: none;
   font-size: 14px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.map-search .search-input::-webkit-search-decoration,
+.map-search .search-input::-webkit-search-cancel-button,
+.map-search .search-input::-webkit-search-results-button,
+.map-search .search-input::-webkit-search-results-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+
+.map-search .search-input::-ms-clear,
+.map-search .search-input::-ms-reveal {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .clear-search-btn {
@@ -1488,6 +1505,7 @@ body.dark {
   flex-shrink: 0;
   opacity: 1;
   pointer-events: auto;
+  padding-top: 62px;
 }
 
 .left-panel::before { display: none; }
@@ -1540,22 +1558,6 @@ body.dark {
   font-size: 18px;
   color: var(--text-primary);
   line-height: 1.2;
-}
-
-.panel-close {
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--border-mid);
-  background: var(--bg-base);
-  color: var(--text-secondary);
-  border-radius: var(--radius-sm);
-  font-size: 20px;
-  cursor: pointer;
-}
-
-.panel-close:hover {
-  color: var(--danger);
-  border-color: var(--danger);
 }
 
 .panel-content {
