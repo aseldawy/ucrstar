@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import struct
 import zlib
 from pathlib import Path
@@ -312,6 +313,8 @@ def to_feature(record: dict[str, Any]) -> dict[str, Any]:
 def normalize_json(value: Any) -> Any:
     if hasattr(value, "item"):
         return value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
