@@ -47,6 +47,7 @@ var legendEl = document.getElementById('legend');
 var legendContentEl = document.getElementById('legendContent');
 var baseLayerBtn = document.getElementById('baseLayerBtn');
 var zoomAllBtn = document.getElementById('zoomAllBtn');
+var appEl = document.querySelector('.app');
 var initialUrlState = parseUrlState();
 
 function initMap(center, zoom) {
@@ -638,8 +639,26 @@ function downloadDataset(mode) {
   if (link) link.click();
 }
 
-function showPanel() { leftPanel.classList.add('visible'); updateSearchControls(); }
-function hidePanel() { leftPanel.classList.remove('visible'); setDetailMode(false); updateSearchControls(); }
+function showPanel() {
+  leftPanel.classList.add('visible');
+  if (appEl) appEl.classList.add('panel-open');
+  updateSearchControls();
+  resizeMapSoon();
+}
+function hidePanel() {
+  leftPanel.classList.remove('visible');
+  if (appEl) appEl.classList.remove('panel-open');
+  setDetailMode(false);
+  updateSearchControls();
+  resizeMapSoon();
+}
+
+function resizeMapSoon() {
+  if (!map) return;
+  setTimeout(function(){
+    try { map.resize(); } catch(e) {}
+  }, 280);
+}
 
 function setDetailMode(hasBack) {
   backToResults.hidden = !hasBack;
