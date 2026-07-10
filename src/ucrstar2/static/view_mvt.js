@@ -586,7 +586,8 @@ function geometryIcon(type) {
 function renderSchemaCards(schema) {
   if (!schema.length) return '<div class="panel-empty">No schema available.</div>';
   return schema.filter(function(field){ return field.name && field.name !== 'geometry'; }).map(function(field){
-    return '<div class="schema-card" title="'+escapeHtml(field.type || 'unknown')+'"><span>'+schemaIcon(field.type)+'</span><span>'+escapeHtml(field.name)+'</span></div>';
+    var description = field.description || field.alias || field.type || 'No description available';
+    return '<div class="schema-card" title="'+escapeHtml(description)+'"><span>'+schemaIcon(field.type)+'</span><span>'+escapeHtml(field.name)+'</span></div>';
   }).join('');
 }
 
