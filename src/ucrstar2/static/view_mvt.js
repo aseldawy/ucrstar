@@ -47,6 +47,7 @@ var legendEl = document.getElementById('legend');
 var legendContentEl = document.getElementById('legendContent');
 var baseLayerBtn = document.getElementById('baseLayerBtn');
 var zoomAllBtn = document.getElementById('zoomAllBtn');
+var initialUrlState = parseUrlState();
 
 function initMap(center, zoom) {
   map = new maplibregl.Map({
@@ -109,7 +110,7 @@ window.addEventListener('popstate', function(){
 });
 
 window.addEventListener('load', async function(){
-  initMap();
+  initMap(initialUrlState.center, initialUrlState.zoom);
   await waitForMapLoad();
   await loadDatasets();
   await applyUrlState();
