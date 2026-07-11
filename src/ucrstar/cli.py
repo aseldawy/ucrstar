@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
+from logging.handlers import TimedRotatingFileHandler
 import shutil
 import sys
 import uuid
@@ -37,7 +39,9 @@ def main() -> None:
     parser.add_argument("--datasets-dir", default="datasets")
     parser.add_argument("--database", default="instance/ucrstar.sqlite")
     parser.add_argument("--config", default="ucrstar.config.json")
-    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--log-level", default=None)
+    parser.add_argument("--log-output", choices=["file", "stdout"], default=None)
+    parser.add_argument("--log-dir", default=None)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     serve = subparsers.add_parser("serve")
@@ -118,9 +122,27 @@ def main() -> None:
     )
     add_refresh_arguments(refresh_datasets_parser)
 
+    list_datasets_parser = subparsers.add_parser(
+        "list-datasets",
+        help="List datasets in the catalog.",
+    )
+    list_datasets_parser.add_argument("--format", choices=["table", "csv", "json"], default="table")
+    list_datasets_parser.add_argument("--state", default="all")
+
+    dataset_parser = subparsers.add_parser(
+        "dataset",
+        help="Print a dataset as JSON.",
+    )
+    dataset_parser.add_argument("dataset")
+
     args = parser.parse_args()
-    configure_logging(args.log_level)
     project_config = load_config(args.config)
+    logging_config = project_config.get("logging") or {}
+    configure_logging(
+        args.log_level or logging_config.get("level") or "INFO",
+        output=args.log_output or logging_config.get("output") or "file",
+        log_dir=args.log_dir or logging_config.get("dir") or "log",
+    )
     config = {
         "DATASETS_DIR": args.datasets_dir,
         "DATABASE": args.database,
@@ -152,6 +174,15 @@ def main() -> None:
             LOGGER.info("Added %d dataset(s).", len(added))
         else:
             LOGGER.info("Added dataset %s with ID %s.", added["name"], added["id"])
+        return
+    if args.command == "list-datasets":
+        write_dataset_list(catalog.list({"state": args.state}), args.format)
+        return
+    if args.command == "dataset":
+        dataset = catalog.get(args.dataset)
+        if dataset is None:
+            raise SystemExit(f"Dataset not found: {args.dataset}")
+        print(json.dumps(dataset, indent=2, sort_keys=True))
         return
     if args.command == "process-dataset":
         processed = process_datasets(
@@ -306,7 +337,7 @@ def add_dataset_from_source(
     try:
         return process_registered_dataset(catalog, dataset, datasets_dir, overwrite, build_kwargs, project_config)
     except Exception as exc:
-        catalog.update_state(dataset["id"], "error", error_message=str(exc))
+        record_dataset_error(catalog, dataset, exc)
         raise
 
 
@@ -363,7 +394,7 @@ def add_esri_hub_repository(
         except Exception as exc:
             existing = catalog.get(dataset_name)
             if existing is not None:
-                catalog.update_state(existing["id"], "error", error_message=str(exc))
+                record_dataset_error(catalog, existing, exc)
             LOGGER.exception("Failed to add Esri Hub dataset '%s'", dataset_name)
             if not create_only:
                 continue
@@ -513,7 +544,7 @@ def process_datasets(
             )
             processed += 1
         except Exception as exc:
-            catalog.update_state(dataset["id"], "error", error_message=str(exc))
+            record_dataset_error(catalog, dataset, exc)
             LOGGER.exception("Processing failed for dataset '%s'", dataset["name"])
             if dataset_ref:
                 raise
@@ -770,6 +801,48 @@ def log_existing_dataset_skip(source_label: str, existing: dict[str, Any]) -> No
     )
 
 
+def record_dataset_error(catalog: DatasetCatalog, dataset: dict[str, Any], exc: BaseException) -> None:
+    """Store a dataset error in the catalog for later inspection."""
+    try:
+        catalog.update_state(dataset["id"], "error", error_message=str(exc))
+    except Exception:
+        LOGGER.exception("Could not record error for dataset '%s'", dataset.get("name"))
+
+
+def write_dataset_list(datasets: list[dict[str, Any]], output_format: str) -> None:
+    rows = [
+        {
+            "name": dataset.get("name"),
+            "id": dataset.get("id"),
+            "status": dataset.get("dataset_state"),
+        }
+        for dataset in datasets
+    ]
+    if output_format == "json":
+        print(json.dumps(rows, indent=2))
+        return
+    if output_format == "csv":
+        writer = csv.DictWriter(sys.stdout, fieldnames=["name", "id", "status"])
+        writer.writeheader()
+        writer.writerows(rows)
+        return
+    if not rows:
+        print("No datasets found.")
+        return
+    widths = {
+        "name": max(len("name"), *(len(str(row["name"])) for row in rows)),
+        "id": max(len("id"), *(len(str(row["id"])) for row in rows)),
+        "status": max(len("status"), *(len(str(row["status"])) for row in rows)),
+    }
+    print(f"{'name'.ljust(widths['name'])}  {'id'.ljust(widths['id'])}  {'status'.ljust(widths['status'])}")
+    for row in rows:
+        print(
+            f"{str(row['name']).ljust(widths['name'])}  "
+            f"{str(row['id']).ljust(widths['id'])}  "
+            f"{str(row['status']).ljust(widths['status'])}"
+        )
+
+
 def persist_source_copy(dataset_dir: Path, prepared: Any) -> None:
     """Keep a durable copy of downloaded source files under <dataset>/download."""
     source = getattr(prepared, "source", {}) or {}
@@ -847,12 +920,26 @@ def write_source_summary(dataset_dir: Path, source: dict[str, Any]) -> None:
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
-def configure_logging(level_name: str) -> None:
+def configure_logging(level_name: str, *, output: str = "file", log_dir: str | Path = "log") -> None:
     level = getattr(logging, level_name.upper(), logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    if output == "stdout":
+        handler: logging.Handler = logging.StreamHandler(sys.stdout)
+    else:
+        log_path = Path(log_dir)
+        log_path.mkdir(parents=True, exist_ok=True)
+        handler = TimedRotatingFileHandler(
+            log_path / "ucrstar.log",
+            when="midnight",
+            backupCount=30,
+            encoding="utf-8",
+        )
+    handler.setFormatter(formatter)
+    root.addHandler(handler)
+    logging.getLogger("werkzeug").setLevel(level)
 
 
 if __name__ == "__main__":

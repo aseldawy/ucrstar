@@ -481,8 +481,25 @@ def fetch_json(url: str, params: dict[str, Any] | None = None, *, method: str = 
         headers={"User-Agent": "ucrstar/0.1"},
         method=method,
     )
-    with urllib.request.urlopen(request, timeout=120, context=ssl_context()) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=120, context=ssl_context()) as response:
+            raw = response.read()
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                snippet = raw.decode("utf-8", errors="replace")[:500]
+                raise ValueError(
+                    "ArcGIS returned non-JSON response from "
+                    f"{request_url} (status={getattr(response, 'status', 'unknown')}, "
+                    f"content_type={response.headers.get('Content-Type')!r}, "
+                    f"body={snippet!r})"
+                ) from exc
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+        raise ValueError(
+            f"ArcGIS request failed for {request_url} "
+            f"(status={exc.code}, content_type={exc.headers.get('Content-Type')!r}, body={body[:500]!r})"
+        ) from exc
 
 
 def download_url(url: str, target: Path) -> None:

@@ -46,6 +46,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
         },
     },
+    "logging": {
+        "output": "file",
+        "dir": "log",
+        "level": "INFO",
+    },
 }
 
 
