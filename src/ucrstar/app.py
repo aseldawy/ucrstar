@@ -6,6 +6,7 @@ import json
 import math
 import struct
 import zlib
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -21,6 +22,7 @@ from flask import (
     send_from_directory,
     stream_with_context,
 )
+from werkzeug.serving import WSGIRequestHandler
 
 from .catalog import DatasetCatalog
 from .config import load_config
@@ -28,6 +30,27 @@ from .llm import llm_from_config
 
 
 DEFAULT_BATCH_SIZE = 1000
+
+
+class TimingWSGIRequestHandler(WSGIRequestHandler):
+    """Werkzeug request handler that appends request duration to access logs."""
+
+    def handle(self) -> None:
+        self._request_start = time.perf_counter()
+        super().handle()
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        elapsed_ms = (time.perf_counter() - getattr(self, "_request_start", time.perf_counter())) * 1000
+        self.log(
+            "info",
+            '%s - - [%s] "%s" %s %s %.2fms',
+            self.address_string(),
+            self.log_date_time_string(),
+            self.requestline,
+            code,
+            size,
+            elapsed_ms,
+        )
 
 
 def create_app(config: dict[str, Any] | None = None) -> Flask:
@@ -86,18 +109,18 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                         limit=int(llm_config.get("search_limit", 20)),
                     )
                     if results:
-                        return jsonify({"datasets": results, "search": "semantic"})
+                        return jsonify({"datasets": [redact_source(dataset) for dataset in results], "search": "semantic"})
                 except Exception:
                     if not llm_config.get("fallback_on_error", True):
                         raise
-        return jsonify({"datasets": catalog().list(filters)})
+        return jsonify({"datasets": [redact_source(dataset) for dataset in catalog().list(filters)]})
 
     @app.get("/datasets/<dataset_ref>.json")
     def dataset_details(dataset_ref: str) -> Response:
         dataset = catalog().get(dataset_ref)
         if dataset is None:
             return jsonify({"error": "dataset not found"}), 404
-        return jsonify(dataset)
+        return jsonify(redact_source(dataset))
 
     @app.get("/datasets/<dataset_ref>/style.json")
     def dataset_style(dataset_ref: str) -> Response:
@@ -240,6 +263,20 @@ def request_geometry() -> tuple[float, float, float, float] | dict[str, Any] | N
     if len(parts) != 4:
         raise ValueError("MBR must contain four comma-separated numbers")
     return tuple(parts)  # type: ignore[return-value]
+
+
+def redact_source(dataset: dict[str, Any]) -> dict[str, Any]:
+    """Hide local filesystem details from HTTP responses while preserving local state."""
+    source = dataset.get("source")
+    if not source or source.get("type") != "local":
+        return dataset
+    redacted = dict(dataset)
+    redacted["source"] = {
+        **source,
+        "url": None,
+        "metadata": {},
+    }
+    return redacted
 
 
 def iter_batches(dataset_dir: Path, geometry: Any) -> Iterable[Any]:

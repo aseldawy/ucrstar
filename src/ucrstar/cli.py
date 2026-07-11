@@ -15,7 +15,7 @@ import starlet
 LOGGER = logging.getLogger(__name__)
 
 if __package__:
-    from .app import create_app
+    from .app import TimingWSGIRequestHandler, create_app
     from .catalog import DatasetCatalog
     from .config import load_config
     from .esri_hub import EsriHubClient, HubDataset
@@ -24,6 +24,7 @@ if __package__:
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ucrstar.app import create_app
+    from ucrstar.app import TimingWSGIRequestHandler
     from ucrstar.catalog import DatasetCatalog
     from ucrstar.config import load_config
     from ucrstar.esri_hub import EsriHubClient, HubDataset
@@ -65,15 +66,16 @@ def main() -> None:
         action="store_true",
         help="Only register the dataset source in the database; do not build or publish it.",
     )
-    add_dataset.add_argument("--zoom", type=int, default=7)
+    add_dataset.add_argument("--zoom", type=int, default=None)
     add_dataset.add_argument("--partition-size", type=int)
     add_dataset.add_argument("--threshold", type=int)
     add_dataset.add_argument(
         "--no-covering-bbox",
         action="store_true",
+        default=None,
         help="Do not write per-row bounding boxes for faster spatial pruning.",
     )
-    add_dataset.add_argument("--pmtiles", action="store_true")
+    add_dataset.add_argument("--pmtiles", action="store_true", default=None)
 
     process_dataset = subparsers.add_parser(
         "process-dataset",
@@ -192,19 +194,21 @@ def main() -> None:
             port=args.port,
             debug=args.debug,
             use_reloader=args.reload,
+            request_handler=TimingWSGIRequestHandler,
         )
 
 
 def add_build_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--zoom", type=int, default=7)
+    parser.add_argument("--zoom", type=int, default=None)
     parser.add_argument("--partition-size", type=int)
     parser.add_argument("--threshold", type=int)
     parser.add_argument(
         "--no-covering-bbox",
         action="store_true",
+        default=None,
         help="Do not write per-row bounding boxes for faster spatial pruning.",
     )
-    parser.add_argument("--pmtiles", action="store_true")
+    parser.add_argument("--pmtiles", action="store_true", default=None)
 
 
 def add_refresh_arguments(parser: argparse.ArgumentParser) -> None:
@@ -218,11 +222,13 @@ def add_refresh_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    build_kwargs = {
-        "zoom": args.zoom,
-        "covering_bbox": not args.no_covering_bbox,
-        "pmtiles": args.pmtiles,
-    }
+    build_kwargs: dict[str, Any] = {}
+    if args.zoom is not None:
+        build_kwargs["zoom"] = args.zoom
+    if args.no_covering_bbox is not None:
+        build_kwargs["covering_bbox"] = not args.no_covering_bbox
+    if args.pmtiles is not None:
+        build_kwargs["pmtiles"] = args.pmtiles
     if args.partition_size is not None:
         build_kwargs["partition_size"] = args.partition_size
     if args.threshold is not None:

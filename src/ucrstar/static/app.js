@@ -412,10 +412,15 @@ function renderDatasetDetails(dataset) {
 }
 
 function renderSource(source) {
-  if (!source || !source.url) {
+  if (!source || source.type === "local") {
+    return source
+      ? `<div class="source-row"><span>Local file</span></div>`
+      : "";
+  }
+  if (!source.url) {
     return "";
   }
-  const label = source.type === "local" ? "Local source" : "Source";
+  const label = "Source";
   const href = source.url.startsWith("http://") || source.url.startsWith("https://")
     ? source.url
     : "";
@@ -423,12 +428,7 @@ function renderSource(source) {
     ? `<span class="muted">Updated ${escapeHtml(formatDateTime(source.modified_at))}</span>`
     : "";
   if (!href) {
-    return `
-      <div class="source-row">
-        <span>${escapeHtml(label)}: ${escapeHtml(source.url)}</span>
-        ${modified}
-      </div>
-    `;
+    return "";
   }
   return `
     <div class="source-row">

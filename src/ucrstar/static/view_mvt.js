@@ -601,14 +601,15 @@ function schemaIcon(type) {
 }
 
 function renderSource(source) {
-  if (!source || !source.url) return '';
-  var label = source.type === 'local' ? 'Local source' : 'Source';
+  if (!source || source.type === 'local') return source ? '<div class="source-row"><span>Local file</span></div>' : '';
+  if (!source.url) return '';
+  var label = 'Source';
   var updated = source.modified_at ? 'Updated '+escapeHtml(formatDateTime(source.modified_at)) : 'Last update unknown';
   var href = /^https?:\/\//.test(source.url) ? source.url : '';
   if (href) {
     return '<div class="source-row"><a href="'+escapeHtml(href)+'" target="_blank" rel="noreferrer">'+escapeHtml(label)+'</a><span>'+updated+'</span></div>';
   }
-  return '<div class="source-row"><span>'+escapeHtml(label)+': '+escapeHtml(source.url)+'</span><span>'+updated+'</span></div>';
+  return '';
 }
 
 function renderDownloadControls(dataset) {
