@@ -130,6 +130,14 @@ def main() -> None:
 
     if args.command == "add-dataset":
         LOGGER.info("Adding dataset from %s", args.input_path)
+        source = registration_source(args.input_path)
+        existing = find_dataset_by_source(catalog, source)
+        if existing is None:
+            candidate_name = args.name or dataset_name_from_source(source, source_name_path(args.input_path, source))
+            existing = catalog.get(candidate_name)
+        if existing is not None:
+            log_existing_dataset_skip(args.input_path, existing)
+            return
         added = add_dataset_from_source(
             catalog,
             args.input_path,
@@ -261,7 +269,15 @@ def add_dataset_from_source(
 
     if create_only:
         source = registration_source(input_path_or_url)
+        existing = find_dataset_by_source(catalog, source)
+        if existing is not None:
+            log_existing_dataset_skip(input_path_or_url, existing)
+            return existing
         dataset_name = dataset_name or dataset_name_from_source(source, source_name_path(input_path_or_url, source))
+        existing = catalog.get(dataset_name)
+        if existing is not None:
+            log_existing_dataset_skip(input_path_or_url, existing)
+            return existing
         dataset = catalog.register_source(
             dataset_name,
             source,
@@ -272,7 +288,15 @@ def add_dataset_from_source(
         return dataset
 
     source = registration_source(input_path_or_url)
+    existing = find_dataset_by_source(catalog, source)
+    if existing is not None:
+        log_existing_dataset_skip(input_path_or_url, existing)
+        return existing
     dataset_name = dataset_name or dataset_name_from_source(source, source_name_path(input_path_or_url, source))
+    existing = catalog.get(dataset_name)
+    if existing is not None:
+        log_existing_dataset_skip(input_path_or_url, existing)
+        return existing
     dataset = catalog.register_source(
         dataset_name,
         source,
@@ -309,7 +333,15 @@ def add_esri_hub_repository(
             continue
 
         source = esri_hub_source(client, hub_dataset, metadata)
+        existing = find_dataset_by_source(catalog, source)
+        if existing is not None:
+            log_existing_dataset_skip(hub_dataset.title, existing)
+            continue
         dataset_name = dataset_name_from_source(source, Path(hub_dataset.title))
+        existing = catalog.get(dataset_name)
+        if existing is not None:
+            log_existing_dataset_skip(hub_dataset.title, existing)
+            continue
         try:
             dataset = catalog.register_source(
                 dataset_name,
@@ -684,6 +716,58 @@ def cleanup_dataset_dir(datasets_dir: Path, name: str) -> None:
         starlet.delete_dataset(str(datasets_dir), name, missing_ok=True)
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
+
+
+def find_dataset_by_source(catalog: DatasetCatalog, source: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first catalog dataset whose source fingerprint matches ``source``."""
+    source_key = source_identity(source)
+    if source_key is None:
+        return None
+    for dataset in catalog.list({"state": "all"}):
+        current = dataset.get("source")
+        if current and source_identity(current) == source_key:
+            return catalog.get(dataset["id"])
+    return None
+
+
+def source_identity(source: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Build a stable source fingerprint for duplicate detection."""
+    if not source:
+        return None
+
+    source_type = source.get("type")
+    url = source.get("url")
+    metadata = source.get("metadata") or {}
+
+    if source_type in {"local", "remote_file"} and url:
+        return (source_type, url)
+
+    if source_type == "esri_hub" and url:
+        repository = metadata.get("repository") or {}
+        return (
+            source_type,
+            url,
+            repository.get("site_url"),
+            metadata.get("record_id"),
+            metadata.get("item_id"),
+            metadata.get("layer_id"),
+            metadata.get("service_url"),
+        )
+
+    return (source_type, url, json.dumps(metadata, sort_keys=True, default=str))
+
+
+def log_existing_dataset_skip(source_label: str, existing: dict[str, Any]) -> None:
+    """Log a warning when a dataset source already exists in the catalog."""
+    existing_source = existing.get("source") or {}
+    LOGGER.warning(
+        "Skipping dataset '%s': already exists as '%s' (id=%s, type=%s, url=%s)",
+        source_label,
+        existing["name"],
+        existing["id"],
+        existing_source.get("type"),
+        existing_source.get("url"),
+    )
 
 
 def persist_source_copy(dataset_dir: Path, prepared: Any) -> None:

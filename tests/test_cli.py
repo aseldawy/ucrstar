@@ -176,6 +176,194 @@ def test_add_dataset_create_only_registers_remote_source_timestamp(
     assert dataset["source"]["metadata"]["content_type"] == "application/geo+json"
 
 
+def test_add_dataset_skips_existing_local_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    input_path = tmp_path / "source.geojson"
+    input_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+
+    def fail_add_dataset(*args, **kwargs):
+        raise AssertionError("starlet.add_dataset should not be called for duplicate local source")
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fail_add_dataset)
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    catalog.register_source(
+        "roads",
+        cli.registration_source(str(input_path)),
+        overwrite=True,
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            str(input_path),
+            "--name",
+            "roads_copy",
+        ],
+    )
+
+    cli.main()
+
+    assert cli.DatasetCatalog(db_path, datasets_dir).list({"state": "all"})[0]["name"] == "roads"
+
+
+def test_add_dataset_skips_existing_remote_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    url = "https://example.com/data/roads.geojson"
+
+    monkeypatch.setattr(
+        cli,
+        "source_reference",
+        lambda value: {
+            "type": "remote_file",
+            "url": value,
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": "2026-06-30T06:24:35+00:00",
+            "metadata": {
+                "path": "/data/roads.geojson",
+                "filename": "roads.geojson",
+                "content_type": "application/geo+json",
+            },
+        },
+    )
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    catalog.register_source(
+        "roads",
+        cli.registration_source(url),
+        overwrite=True,
+    )
+
+    def fail_add_dataset(*args, **kwargs):
+        raise AssertionError("starlet.add_dataset should not be called for duplicate remote source")
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fail_add_dataset)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            url,
+        ],
+    )
+
+    cli.main()
+
+    assert cli.DatasetCatalog(db_path, datasets_dir).list({"state": "all"})[0]["name"] == "roads"
+
+
+def test_add_esri_hub_repository_skips_existing_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    calls = {"add_dataset": 0}
+
+    class FakeHubClient:
+        site_url = "https://egis-lacounty.hub.arcgis.com"
+        search_base_url = "https://egis-lacounty.hub.arcgis.com/api/search/v1"
+        download_base_url = "https://egis-lacounty.hub.arcgis.com/api/download/v1"
+
+        def __init__(self, site_url):
+            calls["site_url"] = site_url
+
+        def iter_datasets(self, **kwargs):
+            calls["iter_kwargs"] = kwargs
+            return iter(
+                [
+                    HubDataset(
+                        {
+                            "id": "11111111111111111111111111111111_0",
+                            "properties": {
+                                "title": "Address Points",
+                                "type": "Feature Layer",
+                                "url": "https://services.example.com/FeatureServer",
+                                "properties": {"downloads": {"formats": [{"key": "geojson"}]}},
+                            },
+                        }
+                    )
+                ]
+            )
+
+        def metadata(self, record_id):
+            return {
+                "record": {"id": record_id},
+                "properties": {"title": "Address Points"},
+                "arcgis_item": {
+                    "id": "11111111111111111111111111111111",
+                    "title": "Address Points",
+                    "description": "<p>Address point layer</p>",
+                    "modified": 1782800675000,
+                },
+                "layer": {"geometryType": "esriGeometryPoint"},
+                "download_links": [{"format": "geojson", "url": "https://example.com/download"}],
+            }
+
+    monkeypatch.setattr(cli, "EsriHubClient", FakeHubClient)
+    monkeypatch.setattr(cli.starlet, "add_dataset", lambda *args, **kwargs: calls.__setitem__("add_dataset", calls["add_dataset"] + 1))
+
+    existing_source = cli.esri_hub_source(
+        FakeHubClient("https://egis-lacounty.hub.arcgis.com/search"),
+        HubDataset(
+            {
+                "id": "11111111111111111111111111111111_0",
+                "properties": {
+                    "title": "Address Points",
+                    "type": "Feature Layer",
+                    "url": "https://services.example.com/FeatureServer",
+                    "properties": {"downloads": {"formats": [{"key": "geojson"}]}},
+                },
+            }
+        ),
+        FakeHubClient("https://egis-lacounty.hub.arcgis.com/search").metadata("11111111111111111111111111111111_0"),
+    )
+    cli.DatasetCatalog(db_path, datasets_dir).register_source("Address_Points", existing_source, overwrite=True)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            "https://egis-lacounty.hub.arcgis.com/search",
+            "--create-only",
+        ],
+    )
+
+    cli.main()
+
+    assert calls["add_dataset"] == 0
+    assert cli.DatasetCatalog(db_path, datasets_dir).list({"state": "all"})[0]["name"] == "Address_Points"
+
+
 def test_add_dataset_create_only_registers_esri_hub_repository(
     tmp_path: Path,
     monkeypatch,
