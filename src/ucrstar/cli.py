@@ -8,6 +8,7 @@ from logging.handlers import TimedRotatingFileHandler
 import shutil
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ if __package__:
     from .config import load_config
     from .esri_hub import EsriHubClient, HubDataset
     from .llm import llm_from_config
-    from .sources import clean_html, current_source_state, source_reference, prepare_input_source, utc_now_iso
+    from .sources import clean_html, current_source_state, safe_filename, source_reference, prepare_input_source, utc_now_iso
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ucrstar.app import create_app
@@ -31,7 +32,7 @@ else:
     from ucrstar.config import load_config
     from ucrstar.esri_hub import EsriHubClient, HubDataset
     from ucrstar.llm import llm_from_config
-    from ucrstar.sources import clean_html, current_source_state, source_reference, prepare_input_source, utc_now_iso
+    from ucrstar.sources import clean_html, current_source_state, safe_filename, source_reference, prepare_input_source, utc_now_iso
 
 
 def main() -> None:
@@ -565,10 +566,12 @@ def process_registered_dataset(
         raise ValueError(f"Dataset has no source URL: {dataset['name']}")
 
     LOGGER.info("Processing dataset '%s' from %s", dataset["name"], source_url)
-    with prepare_input_source(source_url) as prepared:
-        if prepared.source.get("type") != "local":
+    prepared = prepare_dataset_source(Path(datasets_dir) / dataset["name"], source_url, source)
+    try:
+        if prepared.source.get("type") != "local" and prepared.source.get("url") == source_url:
             catalog.update_state(dataset["id"], "downloaded")
-        persist_source_copy(Path(datasets_dir) / dataset["name"], prepared)
+        if prepared.source.get("type") != "local" and prepared.path.parent.name != "download":
+            persist_source_copy(Path(datasets_dir) / dataset["name"], prepared)
         build_dataset(prepared.path, datasets_dir, dataset["name"], True, build_kwargs)
         write_source_summary(Path(datasets_dir) / dataset["name"], prepared.source)
         catalog.sync()
@@ -593,6 +596,9 @@ def process_registered_dataset(
         processed = catalog.update_state(processed["id"], "published") or processed
         LOGGER.info("Published dataset %s with ID %s.", processed["name"], processed["id"])
         return processed
+    finally:
+        if hasattr(prepared, "cleanup"):
+            prepared.cleanup()
 
 
 def build_dataset(
@@ -708,8 +714,10 @@ def refresh_dataset(
     dataset_dir = datasets_root / name
 
     try:
-        with prepare_input_source(source_url) as prepared:
-            persist_source_copy(dataset_dir, prepared)
+        prepared = prepare_dataset_source(dataset_dir, source_url, dataset.get("source") or {})
+        try:
+            if prepared.source.get("type") != "local" and prepared.path.parent.name != "download":
+                persist_source_copy(dataset_dir, prepared)
             build_dataset(prepared.path, datasets_root, temp_name, True, build_kwargs)
             write_source_summary(temp_dir, prepared.source)
             swap_dataset_dirs(dataset_dir, temp_dir, backup_dir)
@@ -717,6 +725,9 @@ def refresh_dataset(
             refreshed = sync_source_and_enrich(catalog, name, prepared.source, project_config)
             LOGGER.info("Refreshed dataset %s with ID %s.", refreshed["name"], refreshed["id"])
             return refreshed
+        finally:
+            if hasattr(prepared, "cleanup"):
+                prepared.cleanup()
     except Exception:
         if backup_dir.exists() and not dataset_dir.exists():
             backup_dir.rename(dataset_dir)
@@ -747,6 +758,44 @@ def cleanup_dataset_dir(datasets_dir: Path, name: str) -> None:
         starlet.delete_dataset(str(datasets_dir), name, missing_ok=True)
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
+
+
+def prepare_dataset_source(dataset_dir: Path, source_url: str, source: dict[str, Any]) -> Any:
+    """Prefer a current cached download when it is newer than the remote source."""
+    current = source if source.get("modified_at") else current_source_state(source)
+    if source.get("type") != "local":
+        cached_path = cached_download_path(dataset_dir, current)
+        current_modified = parse_timestamp(current.get("modified_at"))
+        cached_modified = timestamp_from_path(cached_path) if cached_path else None
+        if cached_path and cached_modified is not None:
+            if current_modified is None or cached_modified >= current_modified:
+                LOGGER.info("Using cached source copy for %s", source_url)
+                return SimplePreparedSource(path=cached_path, source=current)
+    return prepare_input_source(source_url)
+
+
+def cached_download_path(dataset_dir: Path, source: dict[str, Any]) -> Path | None:
+    download_dir = dataset_dir / "download"
+    if not download_dir.exists():
+        return None
+    metadata = source.get("metadata") or {}
+    candidates = []
+    filename = metadata.get("filename")
+    if filename:
+        candidates.append(download_dir / str(filename))
+    title = metadata.get("title")
+    if title:
+        candidates.append(download_dir / f"{safe_filename(str(title))}.geojson")
+        candidates.append(download_dir / safe_filename(str(title)))
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    files = [path for path in download_dir.iterdir() if path.is_file()]
+    if len(files) == 1:
+        return files[0]
+    if files:
+        return max(files, key=lambda path: path.stat().st_mtime)
+    return None
 
 
 def find_dataset_by_source(catalog: DatasetCatalog, source: dict[str, Any]) -> dict[str, Any] | None:
@@ -899,6 +948,21 @@ def persist_source_copy(dataset_dir: Path, prepared: Any) -> None:
         else:
             destination.unlink()
     shutil.copy2(source_path, destination)
+
+
+def timestamp_from_path(path: Path | None) -> datetime | None:
+    if path is None or not path.exists():
+        return None
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+
+@dataclass(frozen=True)
+class SimplePreparedSource:
+    path: Path
+    source: dict[str, Any]
+
+    def cleanup(self) -> None:
+        return
 
 
 def source_is_newer(stored: dict[str, Any], current: dict[str, Any]) -> bool:
