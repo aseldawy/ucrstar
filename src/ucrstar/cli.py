@@ -505,6 +505,7 @@ def process_registered_dataset(
     with prepare_input_source(source_url) as prepared:
         if prepared.source.get("type") != "local":
             catalog.update_state(dataset["id"], "downloaded")
+        persist_source_copy(Path(datasets_dir) / dataset["name"], prepared)
         build_dataset(prepared.path, datasets_dir, dataset["name"], overwrite, build_kwargs)
         write_source_summary(Path(datasets_dir) / dataset["name"], prepared.source)
         catalog.sync()
@@ -645,6 +646,7 @@ def refresh_dataset(
 
     try:
         with prepare_input_source(source_url) as prepared:
+            persist_source_copy(dataset_dir, prepared)
             build_dataset(prepared.path, datasets_root, temp_name, True, build_kwargs)
             write_source_summary(temp_dir, prepared.source)
             swap_dataset_dirs(dataset_dir, temp_dir, backup_dir)
@@ -682,6 +684,29 @@ def cleanup_dataset_dir(datasets_dir: Path, name: str) -> None:
         starlet.delete_dataset(str(datasets_dir), name, missing_ok=True)
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
+
+
+def persist_source_copy(dataset_dir: Path, prepared: Any) -> None:
+    """Keep a durable copy of downloaded source files under <dataset>/download."""
+    source = getattr(prepared, "source", {}) or {}
+    if source.get("type") == "local":
+        return
+
+    source_path = getattr(prepared, "path", None)
+    if source_path is None:
+        return
+
+    download_dir = dataset_dir / "download"
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    source_name = Path(source_path).name
+    destination = download_dir / source_name
+    if destination.exists():
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    shutil.copy2(source_path, destination)
 
 
 def source_is_newer(stored: dict[str, Any], current: dict[str, Any]) -> bool:
