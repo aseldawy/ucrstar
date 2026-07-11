@@ -815,6 +815,7 @@ def write_dataset_list(datasets: list[dict[str, Any]], output_format: str) -> No
             "name": dataset.get("name"),
             "id": dataset.get("id"),
             "status": dataset.get("dataset_state"),
+            "size": dataset.get("size_bytes"),
         }
         for dataset in datasets
     ]
@@ -822,25 +823,59 @@ def write_dataset_list(datasets: list[dict[str, Any]], output_format: str) -> No
         print(json.dumps(rows, indent=2))
         return
     if output_format == "csv":
-        writer = csv.DictWriter(sys.stdout, fieldnames=["name", "id", "status"])
+        writer = csv.DictWriter(sys.stdout, fieldnames=["name", "id", "status", "size"])
         writer.writeheader()
         writer.writerows(rows)
         return
     if not rows:
         print("No datasets found.")
         return
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
     widths = {
         "name": max(len("name"), *(len(str(row["name"])) for row in rows)),
         "id": max(len("id"), *(len(str(row["id"])) for row in rows)),
         "status": max(len("status"), *(len(str(row["status"])) for row in rows)),
+        "size": max(len("size"), *(len(human_readable_size(row["size"])) for row in rows)),
     }
-    print(f"{'name'.ljust(widths['name'])}  {'id'.ljust(widths['id'])}  {'status'.ljust(widths['status'])}")
+    print(
+        f"{'name'.ljust(widths['name'])}  "
+        f"{'id'.ljust(widths['id'])}  "
+        f"{'status'.ljust(widths['status'])}  "
+        f"{'size'.rjust(widths['size'])}"
+    )
     for row in rows:
         print(
             f"{str(row['name']).ljust(widths['name'])}  "
             f"{str(row['id']).ljust(widths['id'])}  "
-            f"{str(row['status']).ljust(widths['status'])}"
+            f"{str(row['status']).ljust(widths['status'])}  "
+            f"{human_readable_size(row['size']).rjust(widths['size'])}"
         )
+    print()
+    print("Status summary")
+    summary_name_width = max(len("status"), *(len(status) for status in status_counts))
+    summary_count_width = max(len("count"), *(len(str(count)) for count in status_counts.values()))
+    print(f"{'status'.ljust(summary_name_width)}  {'count'.rjust(summary_count_width)}")
+    for status in sorted(status_counts):
+        print(f"{status.ljust(summary_name_width)}  {str(status_counts[status]).rjust(summary_count_width)}")
+
+
+def human_readable_size(value: Any) -> str:
+    """Format a byte count for table output."""
+    try:
+        size = float(value or 0)
+    except (TypeError, ValueError):
+        return "0b"
+    units = ["b", "kb", "mb", "gb", "tb"]
+    index = 0
+    while size >= 1024 and index < len(units) - 1:
+        size /= 1024
+        index += 1
+    if index == 0:
+        return f"{int(size)}{units[index]}"
+    return f"{size:.1f}{units[index]}"
 
 
 def persist_source_copy(dataset_dir: Path, prepared: Any) -> None:
