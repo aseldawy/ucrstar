@@ -22,6 +22,9 @@ dev = [
 [project.scripts]
 ucrstar = "ucrstar.cli:main"
 
+[tool.ucrstar.runtime]
+temp_dir = ""
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

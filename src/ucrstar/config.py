@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import tempfile
+import tomllib
 from typing import Any
 
 
@@ -10,6 +12,9 @@ DEFAULT_CONFIG_PATH = Path("ucrstar.config.json")
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "runtime": {
+        "temp_dir": None,
+    },
     "llm": {
         "enabled": False,
         "provider": "ollama",
@@ -57,10 +62,31 @@ DEFAULT_CONFIG: dict[str, Any] = {
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     config = json.loads(json.dumps(DEFAULT_CONFIG))
     config_path = Path(path or os.environ.get("UCRSTAR2_CONFIG", DEFAULT_CONFIG_PATH))
+    pyproject_path = Path("pyproject.toml")
+    if config_path != pyproject_path and pyproject_path.exists():
+        config = deep_merge(config, read_config_file(pyproject_path))
     if config_path.exists():
-        with config_path.open("r", encoding="utf-8") as file:
-            config = deep_merge(config, json.load(file))
+        config = deep_merge(config, read_config_file(config_path))
     return expand_env(config)
+
+
+def read_config_file(path: Path) -> dict[str, Any]:
+    if path.suffix.lower() == ".toml":
+        with path.open("rb") as file:
+            loaded = tomllib.load(file)
+        return ((loaded.get("tool") or {}).get("ucrstar") or {}) if path.name == "pyproject.toml" else loaded
+    with path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def configure_runtime(config: dict[str, Any]) -> None:
+    runtime = config.get("runtime") or {}
+    temp_dir = runtime.get("temp_dir")
+    if not temp_dir:
+        return
+    path = Path(temp_dir).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(path)
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

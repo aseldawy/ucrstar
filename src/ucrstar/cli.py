@@ -20,7 +20,7 @@ LOGGER = logging.getLogger(__name__)
 if __package__:
     from .app import TimingWSGIRequestHandler, create_app
     from .catalog import DatasetCatalog
-    from .config import load_config
+    from .config import configure_runtime, load_config
     from .esri_hub import EsriHubClient, HubDataset
     from .llm import llm_from_config
     from .sources import clean_html, current_source_state, safe_filename, source_reference, prepare_input_source, utc_now_iso
@@ -29,7 +29,7 @@ else:
     from ucrstar.app import create_app
     from ucrstar.app import TimingWSGIRequestHandler
     from ucrstar.catalog import DatasetCatalog
-    from ucrstar.config import load_config
+    from ucrstar.config import configure_runtime, load_config
     from ucrstar.esri_hub import EsriHubClient, HubDataset
     from ucrstar.llm import llm_from_config
     from ucrstar.sources import clean_html, current_source_state, safe_filename, source_reference, prepare_input_source, utc_now_iso
@@ -138,6 +138,7 @@ def main() -> None:
 
     args = parser.parse_args()
     project_config = load_config(args.config)
+    configure_runtime(project_config)
     logging_config = project_config.get("logging") or {}
     configure_logging(
         args.log_level or logging_config.get("level") or "INFO",
