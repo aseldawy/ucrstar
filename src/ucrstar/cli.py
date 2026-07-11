@@ -569,7 +569,7 @@ def process_registered_dataset(
         if prepared.source.get("type") != "local":
             catalog.update_state(dataset["id"], "downloaded")
         persist_source_copy(Path(datasets_dir) / dataset["name"], prepared)
-        build_dataset(prepared.path, datasets_dir, dataset["name"], overwrite, build_kwargs)
+        build_dataset(prepared.path, datasets_dir, dataset["name"], True, build_kwargs)
         write_source_summary(Path(datasets_dir) / dataset["name"], prepared.source)
         catalog.sync()
         processed = catalog.get(dataset["name"])
