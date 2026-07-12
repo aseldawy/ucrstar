@@ -469,12 +469,12 @@ def is_url(value: str) -> bool:
 
 def fetch_json(url: str, params: dict[str, Any] | None = None, *, method: str = "GET") -> dict[str, Any]:
     body = None
-    request_url = url
+    request_url = normalize_request_url(url)
     encoded = urllib.parse.urlencode(params or {}).encode("utf-8")
     if method == "POST":
         body = encoded
     elif encoded:
-        request_url = f"{url}?{encoded.decode('utf-8')}"
+        request_url = append_query_params(request_url, encoded.decode("utf-8"))
     request = urllib.request.Request(
         request_url,
         data=body,
@@ -503,7 +503,10 @@ def fetch_json(url: str, params: dict[str, Any] | None = None, *, method: str = 
 
 
 def download_url(url: str, target: Path) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": "ucrstar/0.1"})
+    request = urllib.request.Request(
+        normalize_request_url(url),
+        headers={"User-Agent": "ucrstar/0.1"},
+    )
     with urllib.request.urlopen(request, timeout=120, context=ssl_context()) as response:
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("wb") as output:
@@ -515,14 +518,33 @@ def download_url(url: str, target: Path) -> None:
 
 
 def head_url(url: str) -> dict[str, str]:
-    request = urllib.request.Request(url, headers={"User-Agent": "ucrstar/0.1"}, method="HEAD")
+    request = urllib.request.Request(
+        normalize_request_url(url),
+        headers={"User-Agent": "ucrstar/0.1"},
+        method="HEAD",
+    )
     try:
         with urllib.request.urlopen(request, timeout=30, context=ssl_context()) as response:
             return dict(response.headers.items())
     except urllib.error.HTTPError:
-        request = urllib.request.Request(url, headers={"User-Agent": "ucrstar/0.1"})
+        request = urllib.request.Request(
+            normalize_request_url(url),
+            headers={"User-Agent": "ucrstar/0.1"},
+        )
         with urllib.request.urlopen(request, timeout=30, context=ssl_context()) as response:
             return dict(response.headers.items())
+
+
+def normalize_request_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    path = urllib.parse.quote(parsed.path, safe="/%:@")
+    return urllib.parse.urlunsplit(parsed._replace(path=path))
+
+
+def append_query_params(url: str, encoded_params: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    query = f"{parsed.query}&{encoded_params}" if parsed.query else encoded_params
+    return urllib.parse.urlunsplit(parsed._replace(query=query))
 
 
 def ssl_context() -> ssl.SSLContext:

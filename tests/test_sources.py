@@ -44,6 +44,40 @@ def test_source_reference_for_remote_file_uses_http_timestamp(monkeypatch) -> No
     assert source["metadata"]["content_length"] == "42"
 
 
+def test_fetch_json_encodes_url_path_spaces_and_preserves_query(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json"}
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout, context):
+        captured["url"] = request.full_url
+        return FakeResponse()
+
+    monkeypatch.setattr(sources.urllib.request, "urlopen", fake_urlopen)
+
+    payload = sources.fetch_json(
+        "https://services.example.com/arcgis/rest/services/Inland Flood/FeatureServer?token=abc",
+        {"f": "json"},
+    )
+
+    assert payload == {"ok": True}
+    assert captured["url"] == (
+        "https://services.example.com/arcgis/rest/services/Inland%20Flood/"
+        "FeatureServer?token=abc&f=json"
+    )
+
+
 def test_hub_dataset_item_url_downloads_arcgis_item_data(monkeypatch) -> None:
     url = "https://egis-lacounty.hub.arcgis.com/datasets/cdd4c011519849caa62286044f1d31c9/about"
     calls = {}
