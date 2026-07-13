@@ -216,9 +216,7 @@ async function selectDataset(datasetRef, options) {
 
   currentDatasetInfo = await fetchJson('/datasets/'+encodeURIComponent(datasetRef)+'.json');
   currentDataset = currentDatasetInfo.id || currentDatasetInfo.name;
-  currentAttributes = Array.isArray(currentDatasetInfo.schema)
-    ? currentDatasetInfo.schema.filter(function(field){return field.name && field.name !== 'geometry';})
-    : [];
+  currentAttributes = buildAttributeCatalog(currentDatasetInfo);
   searchInput.value = currentDatasetInfo.name || '';
   updateSearchControls();
   hideQuickResults();
@@ -822,6 +820,32 @@ function getAttributeNames() {
   return currentAttributes.map(function(field){ return field.name; });
 }
 
+function buildAttributeCatalog(dataset) {
+  var schema = Array.isArray(dataset && dataset.schema) ? dataset.schema : [];
+  var summaryAttrs = Array.isArray(dataset && dataset.summary_json && dataset.summary_json.attributes)
+    ? dataset.summary_json.attributes
+    : [];
+  var byName = {};
+
+  schema.forEach(function(field){
+    if (!field || !field.name || field.name === 'geometry') return;
+    byName[field.name] = clone(field);
+  });
+
+  summaryAttrs.forEach(function(field){
+    if (!field || !field.name || field.name === 'geometry') return;
+    if (byName[field.name]) {
+      Object.keys(field).forEach(function(key){
+        if (key !== 'name') byName[field.name][key] = field[key];
+      });
+    } else {
+      byName[field.name] = clone(field);
+    }
+  });
+
+  return Object.keys(byName).map(function(name){ return byName[name]; });
+}
+
 function resetToDefaultStyle() {
   if (!map || !currentDatasetInfo) return;
   try {
@@ -1003,8 +1027,26 @@ function getAttributeStats(attrName, opts){
   opts = opts || {};
   var attr = currentAttributes.find(function(field){ return field.name === attrName; });
   if (attr && attr.stats) {
-    var topK = attr.stats.top_k || [];
-    if (opts.forceCategorical) return {min:null,max:null,count:attr.stats.non_null_count || topK.length,categories:topK.map(function(t){return String(t.value);}).slice(0,8)};
+    var stats = attr.stats;
+    var topK = stats.top_k || [];
+    if (opts.forceCategorical) return {
+      min: null,
+      max: null,
+      count: stats.non_null_count || topK.length,
+      categories: topK.map(function(t){
+        return String(Array.isArray(t) ? t[0] : t && t.value);
+      }).filter(function(value){ return value && value !== 'undefined'; }).slice(0, 8)
+    };
+    if (isFinite(stats.min) || isFinite(stats.max) || topK.length) {
+      return {
+        min: isFinite(stats.min) ? stats.min : null,
+        max: isFinite(stats.max) ? stats.max : null,
+        count: stats.non_null_count || stats.count || topK.length,
+        categories: topK.map(function(t){
+          return String(Array.isArray(t) ? t[0] : t && t.value);
+        }).filter(function(value){ return value && value !== 'undefined'; }).slice(0, 8)
+      };
+    }
   }
   return _buildSyntheticStats(attrName, opts.forceCategorical ? 'categorical' : 'choropleth');
 }
