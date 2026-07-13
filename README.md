@@ -1,7 +1,7 @@
 # UCR Star
 
 Flask backend for serving and exploring geospatial datasets built by
-[`starlet`](starlet_api.md).
+[`starlet`](https://github.com/ucr-bdlab/starlet).
 
 ## Layout
 
