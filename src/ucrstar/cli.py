@@ -127,12 +127,37 @@ def main() -> None:
     )
     add_refresh_arguments(refresh_datasets_parser)
 
+    refresh_repositories_parser = subparsers.add_parser(
+        "refresh-repositories",
+        aliases=["refresh-repository"],
+        help="Refresh one repository, or all repositories when omitted.",
+    )
+    refresh_repositories_parser.add_argument(
+        "repository",
+        nargs="?",
+        help="Repository ID, short name, or URL. Omit to refresh all non-default repositories.",
+    )
+    refresh_repositories_parser.add_argument("--force", action="store_true", help="Refresh datasets even if timestamps match.")
+    refresh_repositories_parser.add_argument(
+        "--create-only",
+        action="store_true",
+        help="Only update source records; do not build or rebuild datasets.",
+    )
+    add_build_arguments(refresh_repositories_parser)
+
     list_datasets_parser = subparsers.add_parser(
         "list-datasets",
         help="List datasets in the catalog.",
     )
     list_datasets_parser.add_argument("--format", choices=["table", "csv", "json"], default="table")
     list_datasets_parser.add_argument("--state", default="all")
+    list_datasets_parser.add_argument("--repository")
+
+    list_repositories_parser = subparsers.add_parser(
+        "list-repositories",
+        help="List repositories in the catalog.",
+    )
+    list_repositories_parser.add_argument("--format", choices=["table", "csv", "json"], default="table")
 
     dataset_parser = subparsers.add_parser(
         "dataset",
@@ -158,6 +183,19 @@ def main() -> None:
 
     if args.command in {"add-dataset", "add-datasets"}:
         LOGGER.info("Adding dataset from %s", args.input_path)
+        if is_ezesri_catalog_url(args.input_path) or is_esri_hub_repository_url(args.input_path):
+            added = add_dataset_from_source(
+                catalog,
+                args.input_path,
+                args.name,
+                args.datasets_dir,
+                args.overwrite,
+                args.create_only,
+                build_kwargs_from_args(args),
+                project_config,
+            )
+            LOGGER.info("Added %d dataset(s).", len(added) if isinstance(added, list) else 1)
+            return
         source = registration_source(args.input_path)
         existing = find_dataset_by_source(catalog, source)
         if existing is None:
@@ -182,7 +220,13 @@ def main() -> None:
             LOGGER.info("Added dataset %s with ID %s.", added["name"], added["id"])
         return
     if args.command == "list-datasets":
-        write_dataset_list(catalog.list({"state": args.state}), args.format)
+        filters = {"state": args.state}
+        if args.repository:
+            filters["repository"] = args.repository
+        write_dataset_list(catalog.list(filters), args.format)
+        return
+    if args.command == "list-repositories":
+        write_repository_list(catalog.list_repositories(), args.format)
         return
     if args.command == "dataset":
         dataset = catalog.get(args.dataset)
@@ -232,8 +276,21 @@ def main() -> None:
         )
         LOGGER.info("Refresh complete. Refreshed %d dataset(s).", refreshed)
         return
+    if args.command in {"refresh-repositories", "refresh-repository"}:
+        refreshed = refresh_repositories(
+            catalog,
+            args.datasets_dir,
+            args.repository,
+            args.force,
+            args.create_only,
+            build_kwargs_from_args(args),
+            project_config,
+        )
+        LOGGER.info("Repository refresh complete. Updated %d dataset(s).", refreshed)
+        return
     if args.command == "serve":
         app = create_app(config)
+        print(f"Serving UCR Star at {server_url(args.host, args.port)}", flush=True)
         app.run(
             host=args.host,
             port=args.port,
@@ -241,6 +298,14 @@ def main() -> None:
             use_reloader=args.reload,
             request_handler=TimingWSGIRequestHandler,
         )
+
+
+def server_url(host: str, port: int) -> str:
+    """Return a browser-friendly URL for the configured development server."""
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    if ":" in display_host and not display_host.startswith("["):
+        display_host = f"[{display_host}]"
+    return f"http://{display_host}:{port}/"
 
 
 def add_build_arguments(parser: argparse.ArgumentParser) -> None:
@@ -270,8 +335,7 @@ def build_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
     build_kwargs: dict[str, Any] = {}
     if args.zoom is not None:
         build_kwargs["zoom"] = args.zoom
-    if args.no_covering_bbox is not None:
-        build_kwargs["covering_bbox"] = not args.no_covering_bbox
+    build_kwargs["covering_bbox"] = not bool(args.no_covering_bbox)
     if args.pmtiles is not None:
         build_kwargs["pmtiles"] = args.pmtiles
     if args.partition_size is not None:
@@ -373,9 +437,24 @@ def add_ezesri_catalog(
     services = payload.get("services") or []
     added: list[dict[str, Any]] = []
     used_names: set[str] = set()
+    repository = ensure_repository(
+        catalog,
+        catalog_url,
+        "ezesri_directory",
+        metadata={
+            "generated_at": payload.get("generated"),
+            "service_count": len(services),
+        },
+        project_config=project_config,
+    )
 
     LOGGER.info("Scanning ezesri catalog %s (%d service entries)", catalog_url, len(services))
     for source in ezesri_catalog_sources(catalog_url, payload):
+        existing = find_dataset_by_source(catalog, source)
+        if existing is not None and not overwrite:
+            catalog.set_dataset_repository(existing["id"], repository["id"])
+            log_existing_dataset_skip(source["metadata"]["title"], existing)
+            continue
         dataset_name = unique_dataset_name(
             catalog,
             dataset_name_from_source(source, Path(source["metadata"]["title"])),
@@ -392,6 +471,7 @@ def add_ezesri_catalog(
                 dataset_name,
                 source,
                 description=(source.get("metadata") or {}).get("description"),
+                repository_id=repository["id"],
                 overwrite=overwrite,
             )
             LOGGER.info("Registered ezesri catalog dataset '%s' in created state", dataset["name"])
@@ -528,6 +608,17 @@ def add_esri_hub_repository(
 ) -> list[dict[str, Any]]:
     client = EsriHubClient(repository_url)
     added: list[dict[str, Any]] = []
+    repository = ensure_repository(
+        catalog,
+        client.site_url,
+        "esri_hub",
+        metadata={
+            "search_base_url": client.search_base_url,
+            "download_base_url": client.download_base_url,
+            "input_url": repository_url,
+        },
+        project_config=project_config,
+    )
     LOGGER.info("Scanning Esri Hub repository %s", client.site_url)
     for hub_dataset in client.iter_datasets(page_size=100):
         metadata = hub_dataset_metadata(client, hub_dataset)
@@ -542,11 +633,13 @@ def add_esri_hub_repository(
         source = esri_hub_source(client, hub_dataset, metadata)
         existing = find_dataset_by_source(catalog, source)
         if existing is not None:
+            catalog.set_dataset_repository(existing["id"], repository["id"])
             log_existing_dataset_skip(hub_dataset.title, existing)
             continue
         dataset_name = dataset_name_from_source(source, Path(hub_dataset.title))
         existing = catalog.get(dataset_name)
         if existing is not None:
+            catalog.set_dataset_repository(existing["id"], repository["id"])
             log_existing_dataset_skip(hub_dataset.title, existing)
             continue
         try:
@@ -554,6 +647,7 @@ def add_esri_hub_repository(
                 dataset_name,
                 source,
                 description=(source.get("metadata") or {}).get("description"),
+                repository_id=repository["id"],
                 overwrite=overwrite,
             )
             LOGGER.info("Registered Esri Hub dataset '%s' in created state", dataset["name"])
@@ -639,6 +733,85 @@ def esri_hub_source(
             "hub": metadata,
         },
     }
+
+
+def ensure_repository(
+    catalog: DatasetCatalog,
+    repository_url: str,
+    repository_type: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+    project_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create or update a repository row for a dataset collection URL."""
+    existing = catalog.get_repository(repository_url)
+    profile = repository_profile(repository_url, repository_type, metadata or {}, project_config or {})
+    short_name = profile["short_name"]
+    if existing is None:
+        short_name = unique_repository_short_name(catalog, short_name)
+    elif existing["short_name"] != short_name:
+        short_name = existing["short_name"]
+    return catalog.upsert_repository(
+        short_name,
+        repository_url,
+        description=profile["description"],
+        repository_type=repository_type,
+        metadata=metadata or {},
+    )
+
+
+def repository_profile(
+    repository_url: str,
+    repository_type: str,
+    metadata: dict[str, Any],
+    project_config: dict[str, Any],
+) -> dict[str, str]:
+    """Build a compact repository short name and description."""
+    parsed = urllib_parse(repository_url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    base = host.split(".")[0] if host else repository_type
+    if repository_type == "ezesri_directory":
+        base = "ezesri"
+        description = "ezesri ArcGIS service directory."
+    elif repository_type == "esri_hub":
+        description = f"Esri Hub repository at {host}."
+    else:
+        description = f"Dataset repository at {host or repository_url}."
+    short_name = safe_repository_short_name(base)
+
+    llm = llm_from_config(project_config)
+    if llm.enabled:
+        try:
+            generated = llm.complete_json(
+                "Return compact JSON for a geospatial dataset repository. "
+                "Use keys short_name and description. short_name must be lowercase, "
+                "URL-safe, and at most 40 characters. description must be at most 180 characters. "
+                f"Repository: {json.dumps({'url': repository_url, 'type': repository_type, 'metadata': metadata}, separators=(',', ':'))}"
+            )
+            if isinstance(generated, dict):
+                short_name = safe_repository_short_name(str(generated.get("short_name") or short_name)) or short_name
+                if generated.get("description"):
+                    description = str(generated["description"])[:180]
+        except Exception:
+            LOGGER.exception("LLM repository profile generation failed for %s", repository_url)
+
+    return {"short_name": short_name or "repository", "description": description}
+
+
+def unique_repository_short_name(catalog: DatasetCatalog, short_name: str) -> str:
+    """Return a repository short name that does not collide with an existing row."""
+    base = safe_repository_short_name(short_name) or "repository"
+    candidate = base
+    index = 2
+    while catalog.get_repository(candidate) is not None:
+        candidate = f"{base}-{index}"
+        index += 1
+    return candidate
+
+
+def safe_repository_short_name(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9_-]+", "-", value.lower()).strip("-_")
+    return cleaned[:40]
 
 
 def is_esri_hub_repository_url(value: str) -> bool:
@@ -769,9 +942,9 @@ def process_registered_dataset(
     try:
         if prepared.source.get("type") != "local" and prepared.source.get("url") == source_url:
             catalog.update_state(dataset["id"], "downloaded")
+        build_dataset(prepared.path, datasets_dir, dataset["name"], True, build_kwargs)
         if prepared.source.get("type") != "local" and prepared.path.parent.name != "download":
             persist_source_copy(Path(datasets_dir) / dataset["name"], prepared)
-        build_dataset(prepared.path, datasets_dir, dataset["name"], True, build_kwargs)
         write_source_summary(Path(datasets_dir) / dataset["name"], prepared.source)
         catalog.sync()
         processed = catalog.get(dataset["name"])
@@ -895,6 +1068,157 @@ def refresh_datasets(
     return refreshed
 
 
+def refresh_repositories(
+    catalog: DatasetCatalog,
+    datasets_dir: str | Path,
+    repository_ref: str | None,
+    force: bool,
+    create_only: bool,
+    build_kwargs: dict[str, Any],
+    project_config: dict[str, Any],
+) -> int:
+    """Refresh one repository, or all non-default repositories."""
+    catalog.sync()
+    if repository_ref:
+        repository = catalog.get_repository(repository_ref)
+        if repository is None:
+            raise SystemExit(f"Repository not found: {repository_ref}")
+        repositories = [repository]
+    else:
+        repositories = [
+            repository
+            for repository in catalog.list_repositories()
+            if not repository.get("is_default")
+        ]
+
+    updated = 0
+    for repository in repositories:
+        updated += refresh_repository(
+            catalog,
+            datasets_dir,
+            repository,
+            force,
+            create_only,
+            build_kwargs,
+            project_config,
+        )
+    return updated
+
+
+def refresh_repository(
+    catalog: DatasetCatalog,
+    datasets_dir: str | Path,
+    repository: dict[str, Any],
+    force: bool,
+    create_only: bool,
+    build_kwargs: dict[str, Any],
+    project_config: dict[str, Any],
+) -> int:
+    """Rescan a repository and reconcile the catalog datasets that belong to it."""
+    LOGGER.info("Refreshing repository '%s' from %s", repository["short_name"], repository["url"])
+    sources = repository_sources(repository)
+    seen_keys = {source_identity(source) for source in sources}
+    seen_keys.discard(None)
+    existing = [
+        dataset
+        for row in catalog.list({"state": "all", "repository": repository["id"]})
+        if (dataset := catalog.get(row["id"])) is not None
+    ]
+    existing_by_key = {
+        source_identity(dataset.get("source") or {}): dataset
+        for dataset in existing
+        if source_identity(dataset.get("source") or {}) is not None
+    }
+
+    updated = 0
+    used_names = {dataset["name"] for dataset in existing}
+    for source in sources:
+        key = source_identity(source)
+        if key is None:
+            continue
+        dataset = existing_by_key.get(key)
+        if dataset is None:
+            dataset_name = unique_dataset_name(
+                catalog,
+                dataset_name_from_source(source, Path((source.get("metadata") or {}).get("title") or "dataset")),
+                source,
+                used_names,
+                overwrite=False,
+            )
+            if dataset_name is None:
+                continue
+            dataset = catalog.register_source(
+                dataset_name,
+                source,
+                description=(source.get("metadata") or {}).get("description"),
+                repository_id=repository["id"],
+                overwrite=False,
+            )
+            LOGGER.info("Registered new repository dataset '%s'", dataset["name"])
+            used_names.add(dataset_name)
+            updated += 1
+            if create_only:
+                continue
+            try:
+                process_registered_dataset(catalog, dataset, datasets_dir, False, build_kwargs, project_config)
+            except Exception as exc:
+                record_dataset_error(catalog, dataset, exc)
+                LOGGER.exception("Processing failed for new repository dataset '%s'", dataset["name"])
+            continue
+
+        current = source
+        source = dataset.get("source") or source
+        catalog.update_source(dataset["id"], current)
+        if create_only:
+            updated += 1
+            continue
+        if force or source_is_newer(source, current):
+            try:
+                refresh_dataset(
+                    catalog,
+                    dataset,
+                    datasets_dir,
+                    current.get("url") or source.get("url"),
+                    force,
+                    build_kwargs,
+                    project_config,
+                )
+                updated += 1
+            except Exception as exc:
+                record_dataset_error(catalog, dataset, exc)
+                LOGGER.exception("Refresh failed for repository dataset '%s'", dataset["name"])
+
+    for dataset in existing:
+        key = source_identity(dataset.get("source") or {})
+        if key not in seen_keys:
+            LOGGER.info("Removing dataset '%s' because it no longer appears in repository '%s'", dataset["name"], repository["short_name"])
+            try:
+                starlet.delete_dataset(str(datasets_dir), dataset["name"], missing_ok=True)
+            except Exception:
+                LOGGER.exception("Could not delete dataset directory for '%s'", dataset["name"])
+            catalog.delete(dataset["id"])
+            updated += 1
+
+    return updated
+
+
+def repository_sources(repository: dict[str, Any]) -> list[dict[str, Any]]:
+    """Discover current dataset sources for a repository row."""
+    repository_type = repository.get("repository_type")
+    url = repository.get("url")
+    if repository_type == "ezesri_directory":
+        return ezesri_catalog_sources(url, fetch_json(url))
+    if repository_type == "esri_hub":
+        client = EsriHubClient(url)
+        sources: list[dict[str, Any]] = []
+        for hub_dataset in client.iter_datasets(page_size=100):
+            metadata = hub_dataset_metadata(client, hub_dataset)
+            if is_supported_hub_dataset(hub_dataset, metadata):
+                sources.append(esri_hub_source(client, hub_dataset, metadata))
+        return sources
+    raise ValueError(f"Unsupported repository type: {repository_type}")
+
+
 def refresh_dataset(
     catalog: DatasetCatalog,
     dataset: dict[str, Any],
@@ -1002,10 +1326,13 @@ def find_dataset_by_source(catalog: DatasetCatalog, source: dict[str, Any]) -> d
     source_key = source_identity(source)
     if source_key is None:
         return None
-    for dataset in catalog.list({"state": "all"}):
+    for row in catalog.list({"state": "all"}):
+        dataset = catalog.get(row["id"])
+        if dataset is None:
+            continue
         current = dataset.get("source")
         if current and source_identity(current) == source_key:
-            return catalog.get(dataset["id"])
+            return dataset
     return None
 
 
@@ -1108,6 +1435,48 @@ def write_dataset_list(datasets: list[dict[str, Any]], output_format: str) -> No
     print(f"{'status'.ljust(summary_name_width)}  {'count'.rjust(summary_count_width)}")
     for status in sorted(status_counts):
         print(f"{status.ljust(summary_name_width)}  {str(status_counts[status]).rjust(summary_count_width)}")
+
+
+def write_repository_list(repositories: list[dict[str, Any]], output_format: str) -> None:
+    rows = [
+        {
+            "short_name": repository.get("short_name"),
+            "id": repository.get("id"),
+            "datasets": repository.get("total_datasets", 0),
+            "url": repository.get("url"),
+            "description": repository.get("description"),
+        }
+        for repository in repositories
+    ]
+    if output_format == "json":
+        print(json.dumps(rows, indent=2))
+        return
+    if output_format == "csv":
+        writer = csv.DictWriter(sys.stdout, fieldnames=["short_name", "id", "datasets", "url", "description"])
+        writer.writeheader()
+        writer.writerows(rows)
+        return
+    if not rows:
+        print("No repositories found.")
+        return
+    columns = ["short_name", "id", "datasets", "url"]
+    widths = {
+        column: max(len(column), *(len(str(row[column])) for row in rows))
+        for column in columns
+    }
+    print(
+        f"{'short_name'.ljust(widths['short_name'])}  "
+        f"{'id'.ljust(widths['id'])}  "
+        f"{'datasets'.rjust(widths['datasets'])}  "
+        f"{'url'.ljust(widths['url'])}"
+    )
+    for row in rows:
+        print(
+            f"{str(row['short_name']).ljust(widths['short_name'])}  "
+            f"{str(row['id']).ljust(widths['id'])}  "
+            f"{str(row['datasets']).rjust(widths['datasets'])}  "
+            f"{str(row['url']).ljust(widths['url'])}"
+        )
 
 
 def human_readable_size(value: Any) -> str:
@@ -1221,6 +1590,11 @@ def write_source_summary(dataset_dir: Path, source: dict[str, Any]) -> None:
 def configure_logging(level_name: str, *, output: str = "file", log_dir: str | Path = "log") -> None:
     level = getattr(logging, level_name.upper(), logging.INFO)
     root = logging.getLogger()
+    retained_handlers = [
+        handler
+        for handler in root.handlers
+        if handler.__class__.__module__.startswith("_pytest.")
+    ]
     root.handlers.clear()
     root.setLevel(level)
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
@@ -1237,6 +1611,8 @@ def configure_logging(level_name: str, *, output: str = "file", log_dir: str | P
         )
     handler.setFormatter(formatter)
     root.addHandler(handler)
+    for retained_handler in retained_handlers:
+        root.addHandler(retained_handler)
     logging.getLogger("werkzeug").setLevel(level)
 
 

@@ -7,6 +7,41 @@ from ucrstar.esri_hub import HubDataset
 from ucrstar.sources import PreparedSource
 
 
+def test_serve_prints_url_to_stdout(tmp_path: Path, monkeypatch, capsys) -> None:
+    calls = {}
+
+    class FakeApp:
+        def run(self, **kwargs):
+            calls["run"] = kwargs
+
+    monkeypatch.setattr(cli, "create_app", lambda config: FakeApp())
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(tmp_path / "datasets"),
+            "--database",
+            str(tmp_path / "instance" / "catalog.sqlite"),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "--log-output",
+            "file",
+            "serve",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8123",
+        ],
+    )
+
+    cli.main()
+
+    assert "Serving UCR Star at http://127.0.0.1:8123/" in capsys.readouterr().out
+    assert calls["run"]["host"] == "0.0.0.0"
+    assert calls["run"]["port"] == 8123
+
+
 def test_add_dataset_builds_and_catalogs_dataset(
     tmp_path: Path,
     monkeypatch,
@@ -569,6 +604,83 @@ def test_add_datasets_create_only_registers_ezesri_catalog_layers(
     assert states["source"]["metadata"]["repository"]["catalog_url"] == catalog_url
     assert states["source"]["metadata"]["repository"]["generated_at"] == "2026-02-01T19:11:17.738739"
     assert states["source"]["metadata"]["directory_service"]["owner"] == "esri_DE_content"
+
+
+def test_refresh_repository_adds_new_and_removes_missing_datasets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    catalog_url = "https://www.ezesri.com/catalog.json"
+    calls = {}
+
+    repository = cli.DatasetCatalog(db_path, datasets_dir).upsert_repository(
+        "ezesri",
+        catalog_url,
+        description="ezesri directory",
+        repository_type="ezesri_directory",
+    )
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    catalog.register_source(
+        "Obsolete",
+        {
+            "type": "ezesri_directory",
+            "url": "https://services.example.com/arcgis/rest/services/Old/FeatureServer/0",
+            "accessed_at": "2026-01-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {"title": "Obsolete", "canonical_id": "old"},
+        },
+        repository_id=repository["id"],
+    )
+
+    monkeypatch.setattr(
+        cli,
+        "fetch_json",
+        lambda url: {
+            "generated": "2026-02-01T19:11:17.738739",
+            "services": [
+                {
+                    "id": "d3a78deedc0749eeb3ed9069773d5551",
+                    "title": "German State Boundaries",
+                    "url": "https://services2.arcgis.com/example/arcgis/rest/services/Germany/FeatureServer",
+                    "description": "Federal state boundaries",
+                    "layers": [{"id": 0, "name": "States", "type": "esriGeometryPolygon"}],
+                    "layerCount": 1,
+                    "capabilities": "Query",
+                }
+            ],
+        },
+    )
+
+    def fake_delete_dataset(datasets_arg, name_arg, **kwargs):
+        calls["deleted"] = name_arg
+        return True
+
+    monkeypatch.setattr(cli.starlet, "delete_dataset", fake_delete_dataset)
+    monkeypatch.setattr(cli.starlet, "list_datasets", lambda root: [])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "refresh-repositories",
+            "ezesri",
+            "--create-only",
+        ],
+    )
+
+    cli.main()
+
+    refreshed = cli.DatasetCatalog(db_path, datasets_dir)
+    assert refreshed.get("Obsolete") is None
+    assert refreshed.get("German_State_Boundaries")["repository_id"] == repository["id"]
+    assert calls["deleted"] == "Obsolete"
 
 
 def test_process_dataset_processes_created_dataset(

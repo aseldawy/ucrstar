@@ -82,6 +82,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/datasets.json")
     def datasets() -> Response:
+        catalog().sync()
         filters = {
             key: value
             for key, value in request.args.items()
@@ -94,6 +95,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                 "min_size",
                 "max_size",
                 "state",
+                "repository",
             }
         }
         filters.setdefault("state", "published")
@@ -114,6 +116,47 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
                     if not llm_config.get("fallback_on_error", True):
                         raise
         return jsonify({"datasets": [redact_source(dataset) for dataset in catalog().list(filters)]})
+
+    @app.get("/repositories.json")
+    def repositories() -> Response:
+        catalog().sync()
+        return jsonify(
+            {
+                "repositories": [
+                    public_repository(repository)
+                    for repository in catalog().list_repositories()
+                ]
+            }
+        )
+
+    @app.get("/repositories/<repository_ref>/datasets.json")
+    def repository_datasets(repository_ref: str) -> Response:
+        catalog().sync()
+        repository = catalog().get_repository(repository_ref)
+        if repository is None:
+            return jsonify({"error": "repository not found"}), 404
+        filters = {
+            key: value
+            for key, value in request.args.items()
+            if key
+            in {
+                "q",
+                "name",
+                "description",
+                "geometry_type",
+                "min_size",
+                "max_size",
+                "state",
+            }
+        }
+        filters.setdefault("state", "published")
+        filters["repository"] = repository["id"]
+        return jsonify(
+            {
+                "repository": public_repository(repository),
+                "datasets": [redact_source(dataset) for dataset in catalog().list(filters)],
+            }
+        )
 
     @app.get("/datasets/<dataset_ref>.json")
     def dataset_details(dataset_ref: str) -> Response:
@@ -209,9 +252,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         data = starlet.get_tile(dataset_path(dataset["name"]), z, x, y)
         return Response(data, mimetype="application/vnd.mapbox-vector-tile")
 
-    with app.app_context():
-        catalog().sync()
-
     @app.get("/<path:filename>")
     def debug_static_file(filename: str) -> Response:
         if not current_app.debug:
@@ -277,6 +317,19 @@ def redact_source(dataset: dict[str, Any]) -> dict[str, Any]:
         "metadata": {},
     }
     return redacted
+
+
+def public_repository(repository: dict[str, Any]) -> dict[str, Any]:
+    """Return the public repository summary used by REST endpoints."""
+    return {
+        "id": repository.get("id"),
+        "short_name": repository.get("short_name"),
+        "url": repository.get("url"),
+        "description": repository.get("description"),
+        "repository_type": repository.get("repository_type"),
+        "is_default": repository.get("is_default"),
+        "total_datasets": repository.get("total_datasets", 0),
+    }
 
 
 def iter_batches(dataset_dir: Path, geometry: Any) -> Iterable[Any]:

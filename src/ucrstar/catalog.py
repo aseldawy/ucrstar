@@ -17,11 +17,14 @@ LOGGER = logging.getLogger(__name__)
 
 DATASET_STATES = {"created", "downloaded", "processed", "ready", "published", "error"}
 PROCESSABLE_STATES = {"created", "downloaded", "processed", "ready", "error"}
+DEFAULT_REPOSITORY_SHORT_NAME = "default"
+DEFAULT_REPOSITORY_URL = "ucrstar://default"
 
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS datasets (
     id TEXT PRIMARY KEY,
+    repository_id TEXT,
     name TEXT NOT NULL UNIQUE,
     description TEXT,
     size_bytes INTEGER NOT NULL DEFAULT 0,
@@ -44,11 +47,27 @@ CREATE TABLE IF NOT EXISTS datasets (
     metadata_json TEXT NOT NULL DEFAULT '{}',
     summary_json TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_datasets_name ON datasets(name);
+CREATE INDEX IF NOT EXISTS idx_datasets_repository_id ON datasets(repository_id);
 CREATE INDEX IF NOT EXISTS idx_datasets_size ON datasets(size_bytes);
+
+CREATE TABLE IF NOT EXISTS repositories (
+    id TEXT PRIMARY KEY,
+    short_name TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL UNIQUE,
+    description TEXT,
+    repository_type TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_repositories_short_name ON repositories(short_name);
 
 CREATE TABLE IF NOT EXISTS dataset_embeddings (
     dataset_id TEXT NOT NULL,
@@ -67,6 +86,7 @@ CREATE TABLE IF NOT EXISTS dataset_embeddings (
 
 LIST_COLUMNS = [
     "id",
+    "repository_id",
     "name",
     "description",
     "size_bytes",
@@ -100,6 +120,7 @@ class DatasetCatalog:
         """Create or migrate the catalog tables needed by the application."""
         with self.connect() as conn:
             conn.executescript(SCHEMA_SQL)
+            ensure_column(conn, "datasets", "repository_id", "TEXT")
             ensure_column(conn, "datasets", "style_json", "TEXT")
             ensure_column(conn, "datasets", "source_type", "TEXT")
             ensure_column(conn, "datasets", "source_url", "TEXT")
@@ -108,6 +129,7 @@ class DatasetCatalog:
             ensure_column(conn, "datasets", "source_metadata_json", "TEXT")
             ensure_column(conn, "datasets", "dataset_state", "TEXT NOT NULL DEFAULT 'published'")
             ensure_column(conn, "datasets", "error_message", "TEXT")
+            self._ensure_default_repository(conn)
 
     def sync(self) -> list[dict[str, Any]]:
         """Read Starlet dataset directories and upsert their metadata into SQLite."""
@@ -117,14 +139,17 @@ class DatasetCatalog:
         LOGGER.info("Discovered %d dataset directorie(s) in %s", len(names), self.datasets_dir)
 
         with self.connect() as conn:
+            default_repository = self.default_repository()
             known = {
-                row["name"]: row["id"]
-                for row in conn.execute("SELECT id, name FROM datasets")
+                row["name"]: (row["id"], row["repository_id"])
+                for row in conn.execute("SELECT id, repository_id, name FROM datasets")
             }
             for name in names:
-                dataset_id = known.get(name, str(uuid.uuid4()))
+                existing = known.get(name)
+                dataset_id = existing[0] if existing else str(uuid.uuid4())
                 LOGGER.info("Reading Starlet metadata for dataset '%s'", name)
                 row = self._build_row(dataset_id, name)
+                row["repository_id"] = existing[1] if existing and existing[1] else default_repository["id"]
                 self._upsert(conn, row)
                 synced.append(row)
         return synced
@@ -163,6 +188,14 @@ class DatasetCatalog:
             clauses.append("dataset_state = ?")
             values.append(state)
 
+        repository = filters.get("repository")
+        if repository:
+            repository_row = self.get_repository(repository)
+            if repository_row is None:
+                return []
+            clauses.append("repository_id = ?")
+            values.append(repository_row["id"])
+
         for param, op in (("min_size", ">="), ("max_size", "<=")):
             if filters.get(param):
                 clauses.append(f"size_bytes {op} ?")
@@ -176,6 +209,93 @@ class DatasetCatalog:
         with self.connect() as conn:
             return [decode_row(row) for row in conn.execute(sql, values)]
 
+    def list_repositories(self) -> list[dict[str, Any]]:
+        """Return repositories with lightweight dataset counts."""
+        self.init_db()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.*,
+                       COUNT(d.id) AS total_datasets
+                FROM repositories r
+                LEFT JOIN datasets d ON d.repository_id = r.id
+                GROUP BY r.id
+                ORDER BY r.is_default DESC, r.short_name
+                """
+            ).fetchall()
+        return [decode_repository_row(row) for row in rows]
+
+    def get_repository(self, repository_id_or_name: str) -> dict[str, Any] | None:
+        """Fetch a repository by UUID, short name, or URL."""
+        self.init_db()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM repositories WHERE id = ?",
+                (repository_id_or_name,),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT * FROM repositories WHERE short_name = ?",
+                    (repository_id_or_name,),
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT * FROM repositories WHERE url = ?",
+                    (repository_id_or_name,),
+                ).fetchone()
+        return decode_repository_row(row) if row is not None else None
+
+    def default_repository(self) -> dict[str, Any]:
+        """Return the internal repository used for directly added datasets."""
+        self.init_db()
+        repository = self.get_repository(DEFAULT_REPOSITORY_SHORT_NAME)
+        if repository is None:
+            raise RuntimeError("Default repository could not be initialized")
+        return repository
+
+    def upsert_repository(
+        self,
+        short_name: str,
+        url: str,
+        *,
+        description: str | None = None,
+        repository_type: str = "repository",
+        metadata: dict[str, Any] | None = None,
+        is_default: bool = False,
+    ) -> dict[str, Any]:
+        """Insert or update a source repository and return its catalog row."""
+        self.init_db()
+        repository_id = str(uuid.uuid4())
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO repositories (
+                    id, short_name, url, description, repository_type, is_default, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    short_name = excluded.short_name,
+                    description = COALESCE(excluded.description, repositories.description),
+                    repository_type = excluded.repository_type,
+                    is_default = excluded.is_default,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    repository_id,
+                    short_name,
+                    url,
+                    description,
+                    repository_type,
+                    1 if is_default else 0,
+                    json.dumps(metadata or {}),
+                ),
+            )
+        repository = self.get_repository(url)
+        if repository is None:
+            raise RuntimeError(f"Repository was not stored: {url}")
+        return repository
+
     def semantic_search(
         self,
         query: str,
@@ -188,6 +308,12 @@ class DatasetCatalog:
         self.init_db()
         query_vector = llm.embed(query)
         provider, model = split_embedding_key(llm.embedding_key)
+        effective_filters = dict(filters)
+        if effective_filters.get("repository"):
+            repository = self.get_repository(effective_filters["repository"])
+            if repository is None:
+                return []
+            effective_filters["repository"] = repository["id"]
 
         with self.connect() as conn:
             rows = conn.execute(
@@ -203,7 +329,7 @@ class DatasetCatalog:
         scored: list[tuple[float, dict[str, Any]]] = []
         for row in rows:
             dataset = decode_row(row)
-            if not matches_filters(dataset, filters):
+            if not matches_filters(dataset, effective_filters):
                 continue
             vector = json.loads(row["vector_json"])
             scored.append((cosine_distance(query_vector, vector), dataset))
@@ -276,10 +402,13 @@ class DatasetCatalog:
         source: dict[str, Any],
         *,
         description: str | None = None,
+        repository_id: str | None = None,
         overwrite: bool = False,
     ) -> dict[str, Any]:
         """Register source metadata for a dataset before it has been processed."""
         self.init_db()
+        if repository_id is None:
+            repository_id = self.default_repository()["id"]
         existing = self.get(name)
         if existing is not None and not overwrite:
             raise ValueError(f"Dataset already exists: {name}")
@@ -291,6 +420,7 @@ class DatasetCatalog:
                     """
                     UPDATE datasets
                     SET description = ?,
+                        repository_id = ?,
                         size_bytes = 0,
                         num_features = NULL,
                         num_coordinates = NULL,
@@ -315,6 +445,7 @@ class DatasetCatalog:
                     """,
                     (
                         description,
+                        repository_id,
                         source.get("type"),
                         source.get("url"),
                         source.get("accessed_at"),
@@ -330,15 +461,16 @@ class DatasetCatalog:
             conn.execute(
                 """
                 INSERT INTO datasets (
-                    id, name, description, size_bytes, geometry_types,
+                    id, repository_id, name, description, size_bytes, geometry_types,
                     source_type, source_url, source_accessed_at,
                     source_modified_at, source_metadata_json,
                     dataset_state, error_message, metadata_json, summary_json
                 )
-                VALUES (?, ?, ?, 0, '[]', ?, ?, ?, ?, ?, 'created', NULL, '{}', '{}')
+                VALUES (?, ?, ?, ?, 0, '[]', ?, ?, ?, ?, ?, 'created', NULL, '{}', '{}')
                 """,
                 (
                     dataset_id,
+                    repository_id,
                     name,
                     description,
                     source.get("type"),
@@ -374,6 +506,28 @@ class DatasetCatalog:
                 WHERE id = ?
                 """,
                 (state, error_message, dataset["id"]),
+            )
+        return self.get(dataset["id"])
+
+    def set_dataset_repository(
+        self,
+        dataset_id_or_name: str,
+        repository_id: str,
+    ) -> dict[str, Any] | None:
+        """Attach an existing dataset to a repository."""
+        dataset = self.get(dataset_id_or_name)
+        if dataset is None:
+            return None
+        self.init_db()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE datasets
+                SET repository_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (repository_id, dataset["id"]),
             )
         return self.get(dataset["id"])
 
@@ -483,6 +637,40 @@ class DatasetCatalog:
                 LOGGER.info("Stored %d-dimensional dataset embedding", len(vector))
         return self.get(dataset["id"])
 
+    @staticmethod
+    def _ensure_default_repository(conn: sqlite3.Connection) -> None:
+        """Create the internal repository and attach unassigned datasets to it."""
+        repository_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO repositories (
+                id, short_name, url, description, repository_type, is_default, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, 1, '{}')
+            ON CONFLICT(url) DO UPDATE SET
+                short_name = excluded.short_name,
+                description = COALESCE(repositories.description, excluded.description),
+                repository_type = excluded.repository_type,
+                is_default = 1,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                repository_id,
+                DEFAULT_REPOSITORY_SHORT_NAME,
+                DEFAULT_REPOSITORY_URL,
+                "Datasets added directly to UCR Star.",
+                "internal",
+            ),
+        )
+        default_id = conn.execute(
+            "SELECT id FROM repositories WHERE url = ?",
+            (DEFAULT_REPOSITORY_URL,),
+        ).fetchone()["id"]
+        conn.execute(
+            "UPDATE datasets SET repository_id = ? WHERE repository_id IS NULL",
+            (default_id,),
+        )
+
     def _build_row(self, dataset_id: str, name: str) -> dict[str, Any]:
         """Build a catalog row from Starlet metadata and summary files."""
         dataset_dir = self.datasets_dir / name
@@ -539,15 +727,16 @@ class DatasetCatalog:
         conn.execute(
             """
             INSERT INTO datasets (
-                id, name, description, size_bytes, num_features,
+                id, repository_id, name, description, size_bytes, num_features,
                 num_coordinates, geometry_types, mbr, schema_json,
                 citation_json, visualization_type, visualization_url,
                 style_json, source_type, source_url, source_accessed_at,
                 source_modified_at, source_metadata_json, dataset_state,
                 error_message, metadata_json, summary_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
+                repository_id = COALESCE(excluded.repository_id, datasets.repository_id),
                 description = COALESCE(datasets.description, excluded.description),
                 size_bytes = excluded.size_bytes,
                 num_features = excluded.num_features,
@@ -581,6 +770,7 @@ class DatasetCatalog:
             """,
             (
                 row["id"],
+                row.get("repository_id"),
                 row["name"],
                 row["description"],
                 row["size_bytes"],
@@ -642,6 +832,16 @@ def decode_row(row: sqlite3.Row) -> dict[str, Any]:
             "metadata": result.pop("source_metadata_json", None) or {},
         }
     result.pop("vector_json", None)
+    return result
+
+
+def decode_repository_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Convert a repository SQLite row into the API-facing shape."""
+    result = dict(row)
+    result["metadata"] = json.loads(result.pop("metadata_json", "{}") or "{}")
+    result["is_default"] = bool(result.get("is_default"))
+    if "total_datasets" in result:
+        result["total_datasets"] = int(result["total_datasets"] or 0)
     return result
 
 
@@ -722,6 +922,9 @@ def matches_filters(dataset: dict[str, Any], filters: dict[str, str]) -> bool:
         return False
     if filters.get("state") and filters["state"] != "all":
         if dataset.get("dataset_state") != filters["state"]:
+            return False
+    if filters.get("repository"):
+        if dataset.get("repository_id") != filters["repository"]:
             return False
     return True
 

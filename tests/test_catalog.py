@@ -43,6 +43,46 @@ def test_catalog_sync_keeps_stable_id(tmp_path: Path, monkeypatch) -> None:
     assert first["id"] == second["id"]
     assert catalog.get(first["id"])["name"] == "roads"
     assert catalog.get("roads")["num_features"] == 4
+    repositories = catalog.list_repositories()
+    assert repositories[0]["short_name"] == "default"
+    assert repositories[0]["total_datasets"] == 1
+    assert catalog.get("roads")["repository_id"] == repositories[0]["id"]
+
+
+def test_catalog_tracks_repository_and_filters_datasets(tmp_path: Path) -> None:
+    catalog = DatasetCatalog(tmp_path / "catalog.sqlite", tmp_path / "datasets")
+    repository = catalog.upsert_repository(
+        "lacounty",
+        "https://egis-lacounty.hub.arcgis.com",
+        description="LA County GIS data",
+        repository_type="esri_hub",
+    )
+    catalog.register_source(
+        "addresses",
+        {
+            "type": "esri_hub",
+            "url": "https://www.arcgis.com/home/item.html?id=11111111111111111111111111111111",
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {},
+        },
+        repository_id=repository["id"],
+    )
+    catalog.register_source(
+        "local_roads",
+        {
+            "type": "local",
+            "url": str(tmp_path / "roads.geojson"),
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {},
+        },
+    )
+
+    assert [dataset["name"] for dataset in catalog.list({"state": "all", "repository": "lacounty"})] == ["addresses"]
+    counts = {repo["short_name"]: repo["total_datasets"] for repo in catalog.list_repositories()}
+    assert counts["default"] == 1
+    assert counts["lacounty"] == 1
 
 
 def test_catalog_enriches_style_and_embedding(tmp_path: Path, monkeypatch) -> None:

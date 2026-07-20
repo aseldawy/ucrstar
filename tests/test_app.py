@@ -84,6 +84,51 @@ def test_datasets_endpoint_defaults_to_published_state(tmp_path: Path) -> None:
     assert created_body["datasets"][0]["dataset_state"] == "created"
 
 
+def test_repository_endpoints_list_repositories_and_datasets(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("starlet.list_datasets", lambda root: [])
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "test.sqlite"
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": db_path,
+        }
+    )
+
+    from ucrstar.catalog import DatasetCatalog
+
+    catalog = DatasetCatalog(db_path, datasets_dir)
+    repository = catalog.upsert_repository(
+        "lacounty",
+        "https://egis-lacounty.hub.arcgis.com",
+        description="LA County GIS data",
+        repository_type="esri_hub",
+    )
+    dataset = catalog.register_source(
+        "addresses",
+        {
+            "type": "esri_hub",
+            "url": "https://www.arcgis.com/home/item.html?id=11111111111111111111111111111111",
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {},
+        },
+        repository_id=repository["id"],
+    )
+    catalog.update_state(dataset["id"], "published")
+
+    client = app.test_client()
+    repositories = client.get("/repositories.json").get_json()["repositories"]
+    datasets = client.get("/repositories/lacounty/datasets.json").get_json()["datasets"]
+    filtered = client.get("/datasets.json?repository=lacounty").get_json()["datasets"]
+
+    lacounty = [repo for repo in repositories if repo["short_name"] == "lacounty"][0]
+    assert lacounty["total_datasets"] == 1
+    assert datasets[0]["name"] == "addresses"
+    assert filtered[0]["repository_id"] == repository["id"]
+
+
 def test_dataset_tiles_endpoint_uses_nested_dataset_url(
     tmp_path: Path,
     monkeypatch,
