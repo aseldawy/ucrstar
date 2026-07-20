@@ -5,6 +5,7 @@ import csv
 import json
 import logging
 from logging.handlers import TimedRotatingFileHandler
+import re
 import shutil
 import sys
 import uuid
@@ -24,6 +25,7 @@ if __package__:
     from .esri_hub import EsriHubClient, HubDataset
     from .llm import llm_from_config
     from .sources import clean_html, current_source_state, safe_filename, source_reference, prepare_input_source, utc_now_iso
+    from .sources import clean_html, current_source_state, fetch_json, is_arcgis_service_url, source_reference, prepare_input_source, utc_now_iso
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ucrstar.app import create_app
@@ -33,6 +35,7 @@ else:
     from ucrstar.esri_hub import EsriHubClient, HubDataset
     from ucrstar.llm import llm_from_config
     from ucrstar.sources import clean_html, current_source_state, safe_filename, source_reference, prepare_input_source, utc_now_iso
+    from ucrstar.sources import clean_html, current_source_state, fetch_json, is_arcgis_service_url, source_reference, prepare_input_source, utc_now_iso
 
 
 def main() -> None:
@@ -61,6 +64,7 @@ def main() -> None:
 
     add_dataset = subparsers.add_parser(
         "add-dataset",
+        aliases=["add-datasets"],
         help="Build a Starlet dataset and add it to the catalog.",
     )
     add_dataset.add_argument("input_path")
@@ -152,7 +156,7 @@ def main() -> None:
     }
     catalog = DatasetCatalog(args.database, args.datasets_dir)
 
-    if args.command == "add-dataset":
+    if args.command in {"add-dataset", "add-datasets"}:
         LOGGER.info("Adding dataset from %s", args.input_path)
         source = registration_source(args.input_path)
         existing = find_dataset_by_source(catalog, source)
@@ -287,6 +291,19 @@ def add_dataset_from_source(
     build_kwargs: dict[str, Any],
     project_config: dict[str, Any],
 ) -> dict[str, Any] | list[dict[str, Any]]:
+    if is_ezesri_catalog_url(input_path_or_url):
+        if dataset_name:
+            raise ValueError("--name cannot be used when adding an ezesri catalog")
+        return add_ezesri_catalog(
+            catalog,
+            input_path_or_url,
+            datasets_dir,
+            overwrite,
+            create_only,
+            build_kwargs,
+            project_config,
+        )
+
     if is_esri_hub_repository_url(input_path_or_url):
         if dataset_name:
             raise ValueError("--name cannot be used when adding an Esri Hub repository")
@@ -341,6 +358,163 @@ def add_dataset_from_source(
     except Exception as exc:
         record_dataset_error(catalog, dataset, exc)
         raise
+
+
+def add_ezesri_catalog(
+    catalog: DatasetCatalog,
+    catalog_url: str,
+    datasets_dir: str | Path,
+    overwrite: bool,
+    create_only: bool,
+    build_kwargs: dict[str, Any],
+    project_config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    payload = fetch_json(catalog_url)
+    services = payload.get("services") or []
+    added: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+
+    LOGGER.info("Scanning ezesri catalog %s (%d service entries)", catalog_url, len(services))
+    for source in ezesri_catalog_sources(catalog_url, payload):
+        dataset_name = unique_dataset_name(
+            catalog,
+            dataset_name_from_source(source, Path(source["metadata"]["title"])),
+            source,
+            used_names,
+            overwrite=overwrite,
+        )
+        if dataset_name is None:
+            LOGGER.info("Skipping existing ezesri catalog dataset '%s'", source["metadata"]["title"])
+            continue
+
+        try:
+            dataset = catalog.register_source(
+                dataset_name,
+                source,
+                description=(source.get("metadata") or {}).get("description"),
+                overwrite=overwrite,
+            )
+            LOGGER.info("Registered ezesri catalog dataset '%s' in created state", dataset["name"])
+            if not create_only:
+                dataset = process_registered_dataset(
+                    catalog,
+                    dataset,
+                    datasets_dir,
+                    overwrite,
+                    build_kwargs,
+                    project_config,
+                )
+            added.append(dataset)
+            used_names.add(dataset_name)
+        except Exception as exc:
+            existing = catalog.get(dataset_name)
+            if existing is not None:
+                catalog.update_state(existing["id"], "error", error_message=str(exc))
+            LOGGER.exception("Failed to add ezesri catalog dataset '%s'", dataset_name)
+            if create_only:
+                raise
+    LOGGER.info("ezesri catalog scan added %d eligible dataset(s)", len(added))
+    return added
+
+
+def ezesri_catalog_sources(catalog_url: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    generated_at = payload.get("generated")
+    sources: list[dict[str, Any]] = []
+    for service in payload.get("services") or []:
+        if not is_supported_ezesri_service(service):
+            continue
+
+        service_url = str(service.get("url") or "").rstrip("/")
+        layers = service.get("layers") or []
+        if layers:
+            for layer in layers:
+                layer_id = layer.get("id")
+                if layer_id is None:
+                    continue
+                sources.append(ezesri_catalog_source(catalog_url, generated_at, service, layer))
+        else:
+            sources.append(ezesri_catalog_source(catalog_url, generated_at, service, None))
+    return sources
+
+
+def ezesri_catalog_source(
+    catalog_url: str,
+    generated_at: str | None,
+    service: dict[str, Any],
+    layer: dict[str, Any] | None,
+) -> dict[str, Any]:
+    service_url = str(service.get("url") or "").rstrip("/")
+    layer_id = layer.get("id") if layer else None
+    source_url = f"{service_url}/{layer_id}" if layer_id is not None else service_url
+    service_title = str(service.get("title") or service.get("id") or source_url)
+    layer_name = str((layer or {}).get("name") or "")
+    title = f"{service_title} - {layer_name}" if layer_name and int(service.get("layerCount") or 0) != 1 else service_title
+    item_id = str(service.get("id") or "")
+    canonical_id = arcgis_canonical_id(item_id, service_url, layer_id)
+
+    return {
+        "type": "ezesri_directory",
+        "url": source_url,
+        "accessed_at": utc_now_iso(),
+        "modified_at": None,
+        "metadata": {
+            "repository": {
+                "type": "ezesri_directory",
+                "catalog_url": catalog_url,
+                "generated_at": generated_at,
+            },
+            "canonical_id": canonical_id,
+            "arcgis_item_id": item_id if is_arcgis_item_id(item_id) else None,
+            "service_url": service_url,
+            "resolved_url": source_url,
+            "layer_id": layer_id,
+            "layer": layer,
+            "title": title,
+            "description": clean_text(service.get("description")),
+            "category": service.get("category"),
+            "category_key": service.get("categoryKey"),
+            "owner": service.get("owner"),
+            "tags": service.get("tags") or [],
+            "capabilities": service.get("capabilities"),
+            "max_record_count": service.get("maxRecordCount"),
+            "directory_service": service,
+        },
+    }
+
+
+def is_supported_ezesri_service(service: dict[str, Any]) -> bool:
+    service_url = str(service.get("url") or "")
+    if not is_arcgis_service_url(service_url):
+        return False
+    capabilities = {value.strip().lower() for value in str(service.get("capabilities") or "").split(",")}
+    if "query" not in capabilities:
+        return False
+    layers = service.get("layers") or []
+    return not layers or any(str(layer.get("type") or "").startswith("esriGeometry") for layer in layers)
+
+
+def unique_dataset_name(
+    catalog: DatasetCatalog,
+    base_name: str,
+    source: dict[str, Any],
+    used_names: set[str],
+    *,
+    overwrite: bool,
+) -> str | None:
+    if overwrite:
+        return base_name
+    if catalog.get(base_name) is not None:
+        return None
+    if base_name not in used_names:
+        return base_name
+
+    metadata = source.get("metadata") or {}
+    canonical_id = str(metadata.get("canonical_id") or uuid.uuid4().hex)
+    suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", canonical_id).strip("._")[-32:]
+    candidate = f"{base_name}_{suffix}" if suffix else base_name
+    if candidate not in used_names and catalog.get(candidate) is None:
+        return candidate
+    return None
 
 
 def add_esri_hub_repository(
@@ -474,6 +648,13 @@ def is_esri_hub_repository_url(value: str) -> bool:
     return "/datasets/" not in parsed.path.lower()
 
 
+def is_ezesri_catalog_url(value: str) -> bool:
+    parsed = urllib_parse(value)
+    if parsed.netloc.lower() not in {"ezesri.com", "www.ezesri.com"}:
+        return False
+    return parsed.path.rstrip("/").lower().endswith("/catalog.json")
+
+
 def urllib_parse(value: str):
     import urllib.parse
 
@@ -500,6 +681,23 @@ def clean_text(value: Any) -> str | None:
     if not value:
         return None
     return clean_html(str(value))
+
+
+def arcgis_canonical_id(item_id: str, service_url: str, layer_id: Any) -> str:
+    layer_suffix = f":{layer_id}" if layer_id is not None else ""
+    if is_arcgis_item_id(item_id):
+        return f"arcgis-item:{item_id.lower()}{layer_suffix}"
+    return f"arcgis-service:{normalize_service_url(service_url)}{layer_suffix}"
+
+
+def is_arcgis_item_id(value: str | None) -> bool:
+    return bool(value and re.fullmatch(r"[0-9a-fA-F]{32}", value))
+
+
+def normalize_service_url(service_url: str) -> str:
+    parsed = urllib_parse(service_url)
+    path = parsed.path.rstrip("/")
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
 
 
 def registration_source(input_path_or_url: str) -> dict[str, Any]:

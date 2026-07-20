@@ -50,12 +50,14 @@ CLI commands log progress to the console at `INFO` level by default. Use
 .venv/bin/python src/ucrstar/cli.py add-dataset https://example.com/data/roads.geojson --name roads
 .venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads --create-only
 .venv/bin/python src/ucrstar/cli.py add-dataset https://egis-lacounty.hub.arcgis.com/search --create-only
+.venv/bin/python src/ucrstar/cli.py add-datasets https://www.ezesri.com/catalog.json --create-only
 ```
 
 The input can be a local path, a direct public download URL, an ArcGIS item URL,
-an Esri Hub dataset URL, an Esri Hub repository/search URL, or a public ArcGIS
-FeatureServer layer URL. Local paths are processed directly. Direct public URLs
-are downloaded to a temporary directory and then passed to Starlet:
+an Esri Hub dataset URL, an Esri Hub repository/search URL, an ezesri
+`catalog.json` URL, or a public ArcGIS FeatureServer layer URL. Local paths are
+processed directly. Direct public URLs are downloaded to a temporary directory
+and then passed to Starlet:
 
 ```bash
 .venv/bin/python src/ucrstar/cli.py add-dataset \
@@ -79,6 +81,13 @@ registers each eligible vector dataset as a separate catalog entry. With
 ArcGIS item metadata, service/layer metadata when available, and download links
 without processing any datasets. Without `--create-only`, each registered
 dataset is processed one at a time.
+
+When `add-dataset` or its alias `add-datasets` points to
+`https://www.ezesri.com/catalog.json`, it reads the directory feed directly and
+registers each queryable ArcGIS service layer as a created dataset. Each record
+stores the concrete FeatureServer or MapServer layer URL, category, owner, tags,
+directory metadata, and a canonical ArcGIS item/service key. The ezesri Python
+package is not required for this directory import.
 
 By default, the command registers the dataset source, builds the dataset under
 `datasets/`, refreshes the SQLite catalog, enriches metadata when configured,

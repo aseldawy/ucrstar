@@ -468,6 +468,109 @@ def test_add_dataset_create_only_registers_esri_hub_repository(
     assert dataset["source"]["metadata"]["hub"]["arcgis_item"]["title"] == "Address Points"
 
 
+def test_add_datasets_create_only_registers_ezesri_catalog_layers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    calls = {}
+    catalog_url = "https://www.ezesri.com/catalog.json"
+
+    monkeypatch.setattr(
+        cli,
+        "fetch_json",
+        lambda url: {
+            "generated": "2026-02-01T19:11:17.738739",
+            "services": [
+                {
+                    "id": "d3a78deedc0749eeb3ed9069773d5551",
+                    "title": "German State Boundaries",
+                    "place": "Deutschland, DE",
+                    "category": "Boundaries",
+                    "categoryKey": "boundaries",
+                    "url": "https://services2.arcgis.com/example/arcgis/rest/services/Germany/FeatureServer",
+                    "description": "<p>Federal state boundaries</p>",
+                    "owner": "esri_DE_content",
+                    "numViews": 100,
+                    "tags": ["boundaries"],
+                    "layers": [{"id": 0, "name": "States", "type": "esriGeometryPolygon"}],
+                    "layerCount": 1,
+                    "capabilities": "Query,Extract",
+                    "maxRecordCount": 1000,
+                },
+                {
+                    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "title": "Public Safety",
+                    "place": "Example County",
+                    "category": "Emergency",
+                    "categoryKey": "emergency",
+                    "url": "https://services.example.com/arcgis/rest/services/PublicSafety/MapServer",
+                    "description": "Public safety layers",
+                    "owner": "county",
+                    "numViews": 10,
+                    "tags": ["safety"],
+                    "layers": [
+                        {"id": 2, "name": "Stations", "type": "esriGeometryPoint"},
+                        {"id": 3, "name": "Districts", "type": "esriGeometryPolygon"},
+                    ],
+                    "layerCount": 2,
+                    "capabilities": "Query",
+                    "maxRecordCount": 2000,
+                },
+                {
+                    "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "title": "Tiles Only",
+                    "url": "https://services.example.com/arcgis/rest/services/TilesOnly/FeatureServer",
+                    "layers": [{"id": 0, "name": "Tiles", "type": "esriGeometryPolygon"}],
+                    "layerCount": 1,
+                    "capabilities": "Tiles",
+                },
+            ],
+        },
+    )
+
+    def fake_add_dataset(*args, **kwargs):
+        calls["add_dataset"] = True
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-datasets",
+            catalog_url,
+            "--create-only",
+        ],
+    )
+
+    cli.main()
+
+    datasets = cli.DatasetCatalog(db_path, datasets_dir).list({"state": "created"})
+    assert [dataset["name"] for dataset in datasets] == [
+        "German_State_Boundaries",
+        "Public_Safety_-_Districts",
+        "Public_Safety_-_Stations",
+    ]
+    assert calls == {}
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    states = catalog.get("German_State_Boundaries")
+    assert states["description"] == "Federal state boundaries"
+    assert states["source"]["type"] == "ezesri_directory"
+    assert states["source"]["url"] == "https://services2.arcgis.com/example/arcgis/rest/services/Germany/FeatureServer/0"
+    assert states["source"]["metadata"]["canonical_id"] == "arcgis-item:d3a78deedc0749eeb3ed9069773d5551:0"
+    assert states["source"]["metadata"]["repository"]["catalog_url"] == catalog_url
+    assert states["source"]["metadata"]["repository"]["generated_at"] == "2026-02-01T19:11:17.738739"
+    assert states["source"]["metadata"]["directory_service"]["owner"] == "esri_DE_content"
+
+
 def test_process_dataset_processes_created_dataset(
     tmp_path: Path,
     monkeypatch,
