@@ -633,6 +633,27 @@ input[type="color"].style-input {
   background: var(--bg-panel);
 }
 
+.popup-options {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.popup-options input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .popup-body::-webkit-scrollbar { width: 3px; }
 .popup-body::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 2px; }
 

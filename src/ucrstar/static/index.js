@@ -30,6 +30,7 @@ var skipNextUrlUpdate = false;
 var basemapMode = 'street';
 var currentDatasetBounds = null;
 var currentTileAttributesKey = '';
+var currentStyleColors = null;
 
 var searchForm = document.getElementById('searchForm');
 var searchInput = document.getElementById('searchInput');
@@ -240,6 +241,8 @@ async function loadMapDataset(dataset, options) {
   attachClickableCursors();
   populateAttributeSelect();
   populateLabelSelect();
+  syncStylePanelFromDocument(activeDatasetStyle.document);
+  applyLabelsFromStylePanel();
   renderStyleLegend(activeDatasetStyle.document);
 
   var geomText = ((dataset.geometry_types || []).join(' ') || '').toUpperCase();
@@ -364,13 +367,14 @@ async function fetchDatasetStyle(dataset) {
     var style = await fetchJson('/datasets/'+encodeURIComponent(dataset.id || dataset.name)+'/style.json');
     return normalizeDatasetStyle(style);
   } catch(e) {
-    return clone(FALLBACK_STYLE);
+    return normalizeDatasetStyle(fallbackStyleDocument(dataset));
   }
 }
 
-function normalizeDatasetStyle(style) {
+function normalizeDatasetStyle(style, serverDocument) {
   var normalized = clone(FALLBACK_STYLE);
-  normalized.document = style;
+  normalized.document = clone(style);
+  normalized.serverDocument = clone(serverDocument || style);
   if (!style || !Array.isArray(style.layers)) return normalized;
   style.layers.forEach(function(layer){
     if (!layer || ['fill','line','circle'].indexOf(layer.type) === -1) return;
@@ -378,6 +382,24 @@ function normalizeDatasetStyle(style) {
     Object.keys(paint).forEach(function(key){ normalized.layers[layer.type][key] = paint[key]; });
   });
   return normalized;
+}
+
+function fallbackStyleDocument(dataset) {
+  var visualization = dataset && dataset.visualization || {};
+  var source = visualizationSource(visualization);
+  var layerSource = visualization.type === 'VectorTile' ? {'source-layer':visualization.source_layer || SOURCE_LAYER} : {};
+  return {
+    version:8,
+    name:(dataset && dataset.name) || 'UCR Star dataset',
+    metadata:{},
+    sources:{dataset:source},
+    layers:[
+      Object.assign({id:'fill',type:'fill',source:'dataset',filter:['==',['geometry-type'],'Polygon'],paint:clone(FALLBACK_STYLE.layers.fill)},layerSource),
+      Object.assign({id:'outline',type:'line',source:'dataset',filter:['==',['geometry-type'],'Polygon'],paint:clone(FALLBACK_STYLE.layers.line)},layerSource),
+      Object.assign({id:'lines',type:'line',source:'dataset',filter:['==',['geometry-type'],'LineString'],paint:clone(FALLBACK_STYLE.layers.line)},layerSource),
+      Object.assign({id:'points',type:'circle',source:'dataset',filter:['==',['geometry-type'],'Point'],paint:clone(FALLBACK_STYLE.layers.circle)},layerSource)
+    ]
+  };
 }
 
 function renderStyleLegend(style) {
@@ -646,6 +668,16 @@ function showFeaturePopup(properties, lngLat, geojsonUrl) {
   header.appendChild(actions);
   container.appendChild(header);
 
+  var options = document.createElement('label');
+  options.className = 'popup-options';
+
+  var hideNulls = document.createElement('input');
+  hideNulls.type = 'checkbox';
+  hideNulls.checked = true;
+  options.appendChild(hideNulls);
+  options.appendChild(document.createTextNode('Hide null attributes'));
+  container.appendChild(options);
+
   var body = document.createElement('div');
   body.className = 'popup-body';
   container.appendChild(body);
@@ -653,20 +685,20 @@ function showFeaturePopup(properties, lngLat, geojsonUrl) {
   function renderRows() {
     var query = search.value.trim();
     var regexMode = regexBtn.getAttribute('aria-pressed') === 'true';
-    var filtered = rows;
+    var filtered = hideNulls.checked ? rows.filter(function(row){ return !isNullAttribute(row.value); }) : rows;
     var invalidRegex = false;
     if (query) {
       if (regexMode) {
         try {
           var re = new RegExp(query, 'i');
-          filtered = rows.filter(function(row){ return re.test(row.key) || re.test(String(formatValue(row.value))); });
+          filtered = filtered.filter(function(row){ return re.test(row.key) || re.test(String(formatValue(row.value))); });
         } catch(error) {
           invalidRegex = true;
           filtered = [];
         }
       } else {
         var needle = query.toLowerCase();
-        filtered = rows.filter(function(row){ return row.text.toLowerCase().indexOf(needle) !== -1; });
+        filtered = filtered.filter(function(row){ return row.text.toLowerCase().indexOf(needle) !== -1; });
       }
     }
     body.innerHTML = '';
@@ -704,6 +736,7 @@ function showFeaturePopup(properties, lngLat, geojsonUrl) {
   }
 
   search.addEventListener('input', renderRows);
+  hideNulls.addEventListener('change', renderRows);
   regexBtn.addEventListener('click', function(){
     var pressed = regexBtn.getAttribute('aria-pressed') === 'true';
     regexBtn.setAttribute('aria-pressed', String(!pressed));
@@ -714,9 +747,13 @@ function showFeaturePopup(properties, lngLat, geojsonUrl) {
 
   renderRows();
   if (activePopup) activePopup.remove();
-  activePopupState = {search: search, regexBtn: regexBtn, body: body};
+  activePopupState = {search: search, regexBtn: regexBtn, hideNulls: hideNulls, body: body};
   activePopup = new maplibregl.Popup({maxWidth:'420px',closeButton:true}).setLngLat(lngLat).setDOMContent(container).addTo(map);
   activePopup.on('close', function(){ activePopupState = null; });
+}
+
+function isNullAttribute(value) {
+  return value === null || value === undefined;
 }
 
 function renderDatasetDetails(dataset) {
@@ -1005,6 +1042,154 @@ function populateLabelSelect() {
   });
 }
 
+function syncStylePanelFromDocument(style) {
+  if (!style || !Array.isArray(style.layers)) return;
+  var state = styleControlState(style);
+  setStyleSelectValue(attributeSelect, state.attribute, state.attribute);
+  setStyleSelectValue(document.getElementById('vizType'), state.visualization);
+  setColorSchemeControl(state.colors);
+
+  setStyleSelectValue(labelSelect, '');
+  setStyleSelectValue(document.getElementById('labelSize'), '12');
+  document.getElementById('labelColor').value = '#202124';
+  setStyleSelectValue(document.getElementById('labelMinZoom'), '13');
+  setStyleSelectValue(document.getElementById('labelBg'), 'white');
+  var symbol = style.layers.find(function(layer){ return layer && layer.type === 'symbol'; });
+  var labelAttribute = symbol && symbolTextAttribute(symbol.layout && symbol.layout['text-field']);
+  setStyleSelectValue(labelSelect, labelAttribute || '', labelAttribute);
+  if (symbol) {
+    var textSize = symbol.layout && symbol.layout['text-size'];
+    if (typeof textSize === 'number') setStyleSelectValue(document.getElementById('labelSize'), String(textSize), String(textSize));
+    var textColor = symbol.paint && symbol.paint['text-color'];
+    if (typeof textColor === 'string' && isHexColor(textColor)) document.getElementById('labelColor').value = normalizeHexColor(textColor);
+    if (typeof symbol.minzoom === 'number') setStyleSelectValue(document.getElementById('labelMinZoom'), String(symbol.minzoom), String(symbol.minzoom)+'+');
+    setStyleSelectValue(document.getElementById('labelBg'), labelBackgroundFromSymbol(symbol));
+  }
+}
+
+function styleControlState(style) {
+  var metadata = style.metadata && style.metadata['ucrstar:legend'] || {};
+  var preferredAttribute = typeof metadata.property === 'string' ? metadata.property : null;
+  var colorEntries = [];
+  var sizeEntries = [];
+  style.layers.forEach(function(layer){
+    var paint = layer && layer.paint || {};
+    ['fill-color','line-color','circle-color'].forEach(function(property){
+      var expression = paint[property], attribute = expressionProperty(expression);
+      if (attribute) colorEntries.push({attribute:attribute, expression:expression});
+    });
+    ['line-width','circle-radius'].forEach(function(property){
+      var expression = paint[property], attribute = expressionProperty(expression);
+      if (attribute) sizeEntries.push({attribute:attribute, expression:expression});
+    });
+  });
+  var sizeEntry = findStyleEntry(sizeEntries, preferredAttribute);
+  var colorEntry = findStyleEntry(colorEntries, preferredAttribute);
+  if (sizeEntry && (!colorEntry || sizeEntry.attribute === colorEntry.attribute || sizeEntry.attribute === preferredAttribute)) {
+    return {attribute:sizeEntry.attribute, visualization:'size', colors:colorEntry && expressionColors(colorEntry.expression)};
+  }
+  if (!colorEntry) return {attribute:'', visualization:'choropleth', colors:null};
+  return {
+    attribute:colorEntry.attribute,
+    visualization:colorEntry.expression[0] === 'match' ? 'categorical' : 'choropleth',
+    colors:expressionColors(colorEntry.expression)
+  };
+}
+
+function findStyleEntry(entries, preferredAttribute) {
+  if (preferredAttribute) {
+    for (var i=entries.length-1; i>=0; i--) {
+      if (entries[i].attribute === preferredAttribute) return entries[i];
+    }
+  }
+  return entries[entries.length-1] || null;
+}
+
+function expressionColors(expression) {
+  if (!Array.isArray(expression)) return null;
+  var colors = [];
+  var start = expression[0] === 'step' ? 2 : expression[0] === 'interpolate' ? 4 : 3;
+  if (expression[0] === 'match') {
+    for (var i=3; i<expression.length-1; i+=2) {
+      if (typeof expression[i] === 'string') colors.push(expression[i]);
+      else colors = colors.concat(expressionColors(expression[i]) || []);
+    }
+    var fallback = expression[expression.length-1];
+    if (typeof fallback === 'string') colors.push(fallback);
+  } else if (expression[0] === 'interpolate' || expression[0] === 'step') {
+    for (var j=start; j<expression.length; j+=2) if (typeof expression[j] === 'string') colors.push(expression[j]);
+  }
+  return colors.length ? colors : null;
+}
+
+function symbolTextAttribute(textField) {
+  var attribute = expressionProperty(textField);
+  if (attribute) return attribute;
+  var match = typeof textField === 'string' && textField.match(/^\{([^{}]+)\}$/);
+  return match ? match[1] : null;
+}
+
+function setColorSchemeControl(colors) {
+  var select = document.getElementById('colorScheme');
+  if (!select) return;
+  Array.prototype.slice.call(select.querySelectorAll('option[data-current-style]')).forEach(function(option){ option.remove(); });
+  currentStyleColors = colors && colors.length ? colors.slice(0, 5) : null;
+  var scheme = matchingColorScheme(currentStyleColors);
+  if (scheme) {
+    select.value = scheme;
+    return;
+  }
+  if (currentStyleColors) {
+    var option = document.createElement('option');
+    option.value = 'current';
+    option.textContent = 'Current style';
+    option.setAttribute('data-current-style', 'true');
+    select.appendChild(option);
+    select.value = 'current';
+  } else {
+    select.value = 'blues';
+  }
+}
+
+function matchingColorScheme(colors) {
+  if (!colors || !colors.length) return null;
+  var schemes = ['blues','reds','greens','viridis','rainbow'];
+  return schemes.find(function(scheme){
+    var ramp = getColorRamp(scheme);
+    return colors.slice(0, ramp.length).join('|').toLowerCase() === ramp.slice(0, colors.length).join('|').toLowerCase();
+  }) || null;
+}
+
+function setStyleSelectValue(select, value, label) {
+  if (!select || value === null || value === undefined) return;
+  value = String(value);
+  var exists = Array.prototype.some.call(select.options, function(option){ return option.value === value; });
+  if (!exists && value) {
+    var option = document.createElement('option');
+    option.value = value;
+    option.textContent = label || value;
+    option.setAttribute('data-style-value', 'true');
+    select.appendChild(option);
+  }
+  select.value = value;
+}
+
+function labelBackgroundFromSymbol(symbol) {
+  var width = symbol.paint && Number(symbol.paint['text-halo-width']);
+  if (!width) return 'none';
+  var color = String(symbol.paint['text-halo-color'] || '').toLowerCase();
+  return color.indexOf('0,0,0') !== -1 || color === '#000' || color === '#000000' ? 'dark' : 'white';
+}
+
+function isHexColor(value) {
+  return /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(value);
+}
+
+function normalizeHexColor(value) {
+  if (value.length !== 4) return value;
+  return '#' + value[1]+value[1] + value[2]+value[2] + value[3]+value[3];
+}
+
 function getAttributeNames() {
   return currentAttributes.map(function(field){ return field.name; });
 }
@@ -1059,17 +1244,27 @@ function resetToDefaultStyle() {
 
 function resetStyleToServerDefault() {
   if (!map || !currentDatasetInfo) return;
-  if (attributeSelect) attributeSelect.value = '';
-  if (labelSelect) labelSelect.value = '';
-  if (document.getElementById('vizType')) document.getElementById('vizType').value = 'choropleth';
-  if (document.getElementById('colorScheme')) document.getElementById('colorScheme').value = 'blues';
-  if (document.getElementById('labelSize')) document.getElementById('labelSize').value = '12';
-  if (document.getElementById('labelColor')) document.getElementById('labelColor').value = '#202124';
-  if (document.getElementById('labelMinZoom')) document.getElementById('labelMinZoom').value = '13';
-  if (document.getElementById('labelBg')) document.getElementById('labelBg').value = 'white';
+  var serverDocument = clone(activeDatasetStyle.serverDocument);
+  activeDatasetStyle = normalizeDatasetStyle(serverDocument, serverDocument);
+  syncStylePanelFromDocument(activeDatasetStyle.document);
   resetToDefaultStyle();
-  resetLegend();
+  applyLabelsFromStylePanel();
+  renderStyleLegend(activeDatasetStyle.document);
   updateVectorTileAttributes(tileAttributesForStyle(activeDatasetStyle.document));
+}
+
+function applyLocalStyleDocument(style) {
+  if (!style || style.version !== 8 || !Array.isArray(style.layers)) return false;
+  var serverDocument = activeDatasetStyle.serverDocument;
+  activeDatasetStyle = normalizeDatasetStyle(style, serverDocument);
+  currentTileAttributesKey = tileAttributesKey(tileAttributesForStyle(activeDatasetStyle.document));
+  clearDatasetLayer();
+  addDatasetSourceAndLayers(currentDatasetInfo.visualization || {}, activeDatasetStyle.layers);
+  attachClickableCursors();
+  syncStylePanelFromDocument(activeDatasetStyle.document);
+  applyLabelsFromStylePanel();
+  renderStyleLegend(activeDatasetStyle.document);
+  return true;
 }
 
 function resetLegend() {
@@ -1103,6 +1298,14 @@ function applyLabels(attr, fontSize, color){
     map.on('render', _scheduleRender);
     map.on('zoomend', _scheduleRender);
   }
+}
+
+function applyLabelsFromStylePanel() {
+  applyLabels(
+    (labelSelect || {value:''}).value,
+    (document.getElementById('labelSize') || {value:'12'}).value,
+    (document.getElementById('labelColor') || {value:'#202124'}).value
+  );
 }
 function _detachLabelRenderer(){
   if (map && map._labelsBound) {
@@ -1173,13 +1376,11 @@ function applyStyle(){
   var viz = (document.getElementById('vizType') || {value:'choropleth'}).value;
   var scheme = (document.getElementById('colorScheme') || {value:'blues'}).value;
   var labelAttr = (document.getElementById('labelSelect') || {value:''}).value;
-  var requestedAttributes = tileAttributesForStyle(activeDatasetStyle.document, [attr, labelAttr]);
   if (!attr) {
     resetToDefaultStyle();
-    resetLegend();
+    renderStyleLegend(activeDatasetStyle.serverDocument);
   } else {
     var stats = viz === 'categorical' ? getAttributeStats(attr, {forceCategorical:true}) : getAttributeStats(attr);
-    if (!stats || (stats.min === null && (!stats.categories || !stats.categories.length))) stats = _buildSyntheticStats(attr, viz);
     if (stats) {
       if (currentGeometryType === 'polygon') _applyPolygonStyle(attr, viz, stats, scheme);
       else if (currentGeometryType === 'point') _applyPointStyle(attr, viz, stats, scheme);
@@ -1191,78 +1392,134 @@ function applyStyle(){
       }
     }
   }
-  updateVectorTileAttributes(requestedAttributes);
   applyLabels(labelAttr, (document.getElementById('labelSize') || {value:'12'}).value, (document.getElementById('labelColor') || {value:'#202124'}).value);
+  captureLocalStyleDocument(labelAttr);
+  updateVectorTileAttributes(tileAttributesForStyle(activeDatasetStyle.document));
 }
 
-function _buildSyntheticStats(attrName, viz){
-  if (!map) return null;
-  try {
-    var features = map.queryRenderedFeatures({layers:CLICKABLE_LAYERS.filter(function(l){return map.getLayer(l);})});
-    var nums = [], cats = [], seen = {};
-    features.forEach(function(f){
-      var v = f.properties && f.properties[attrName];
-      if (v == null || v === '') return;
-      var s = String(v);
-      if (!seen[s]) { seen[s] = true; cats.push(s); }
-      var n = parseFloat(v);
-      if (!isNaN(n)) nums.push(n);
+function captureLocalStyleDocument(labelAttribute) {
+  var documentStyle = clone(activeDatasetStyle.document);
+  documentStyle.layers.forEach(function(layer){
+    if (!layer || ['fill','line','circle'].indexOf(layer.type) === -1) return;
+    var mapLayerId = layer.type === 'fill' ? 'fill' : layer.type === 'circle' ? 'points' : lineMapLayerId(layer);
+    if (!map.getLayer(mapLayerId)) return;
+    layer.paint = layer.paint || {};
+    var properties = Object.keys(Object.assign({}, activeDatasetStyle.layers[layer.type], layer.paint));
+    properties.forEach(function(property){
+      try {
+        var value = map.getPaintProperty(mapLayerId, property);
+        if (value !== undefined) layer.paint[property] = clone(value);
+      } catch(e) {}
     });
-    if (!cats.length) return null;
-    if (viz === 'categorical' || nums.length < cats.length*0.6) return {min:null,max:null,count:cats.length,categories:cats.slice(0,8)};
-    var mn = Math.min.apply(null, nums), mx = Math.max.apply(null, nums);
-    if (mn === mx) { mn = mn*0.9 || 0; mx = mx*1.1 || 1; }
-    return {min:mn,max:mx,count:nums.length,categories:[]};
-  } catch(e) { return null; }
+  });
+  updateLabelStyleLayer(documentStyle, labelAttribute);
+  if (documentStyle.metadata && documentStyle.metadata['ucrstar:legend']) {
+    delete documentStyle.metadata['ucrstar:legend'];
+  }
+  activeDatasetStyle.document = documentStyle;
+}
+
+function lineMapLayerId(layer) {
+  if (layer.id === 'outline') return 'outline';
+  var filterText = JSON.stringify(layer.filter || []);
+  return filterText.indexOf('Polygon') !== -1 ? 'outline' : 'lines';
+}
+
+function updateLabelStyleLayer(style, labelAttribute) {
+  var symbolIndex = style.layers.findIndex(function(layer){ return layer && layer.type === 'symbol'; });
+  if (!labelAttribute) {
+    if (symbolIndex !== -1) style.layers.splice(symbolIndex, 1);
+    return;
+  }
+  var symbol = symbolIndex === -1 ? {
+    id:'labels',
+    type:'symbol',
+    source:'dataset',
+    layout:{},
+    paint:{}
+  } : style.layers[symbolIndex];
+  if (symbolIndex === -1) {
+    var visualization = currentDatasetInfo.visualization || {};
+    if (visualization.type === 'VectorTile') symbol['source-layer'] = visualization.source_layer || sourceLayer;
+    style.layers.push(symbol);
+  }
+  symbol.minzoom = Number((document.getElementById('labelMinZoom') || {value:0}).value) || 0;
+  symbol.layout = Object.assign({}, symbol.layout, {
+    'text-field':['get', labelAttribute],
+    'text-size':Number((document.getElementById('labelSize') || {value:12}).value) || 12
+  });
+  var color = (document.getElementById('labelColor') || {value:'#202124'}).value;
+  var background = (document.getElementById('labelBg') || {value:'white'}).value;
+  symbol.paint = Object.assign({}, symbol.paint, {'text-color':color});
+  if (background === 'none') {
+    symbol.paint['text-halo-width'] = 0;
+    delete symbol.paint['text-halo-color'];
+  } else {
+    symbol.paint['text-halo-width'] = 2;
+    symbol.paint['text-halo-color'] = background === 'dark' ? 'rgba(20,20,20,0.78)' : '#ffffff';
+  }
 }
 
 function getAttributeStats(attrName, opts){
   opts = opts || {};
   var attr = currentAttributes.find(function(field){ return field.name === attrName; });
-  if (attr && attr.stats) {
-    var stats = attr.stats;
-    var topK = stats.top_k || [];
-    if (opts.forceCategorical) return {
-      min: null,
-      max: null,
-      count: stats.non_null_count || topK.length,
-      categories: topK.map(function(t){
-        return String(Array.isArray(t) ? t[0] : t && t.value);
-      }).filter(function(value){ return value && value !== 'undefined'; }).slice(0, 8)
-    };
-    if (isFinite(stats.min) || isFinite(stats.max) || topK.length) {
-      return {
-        min: isFinite(stats.min) ? stats.min : null,
-        max: isFinite(stats.max) ? stats.max : null,
-        count: stats.non_null_count || stats.count || topK.length,
-        categories: topK.map(function(t){
-          return String(Array.isArray(t) ? t[0] : t && t.value);
-        }).filter(function(value){ return value && value !== 'undefined'; }).slice(0, 8)
-      };
-    }
+  if (!attr) return null;
+  var stats = attr.stats && typeof attr.stats === 'object'
+    ? Object.assign({}, attr, attr.stats)
+    : attr;
+  var topK = Array.isArray(stats.top_k) ? stats.top_k : [];
+  var categories = topK.map(function(entry){
+    return Array.isArray(entry) ? entry[0] : entry && entry.value;
+  }).filter(function(value){
+    return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+  });
+  var min = finiteStatistic(stats.min);
+  var max = finiteStatistic(stats.max);
+  if (opts.forceCategorical) {
+    return categories.length ? {
+      min:null,
+      max:null,
+      count:stats.non_null_count || stats.count || categories.length,
+      categories:categories
+    } : null;
   }
-  return _buildSyntheticStats(attrName, opts.forceCategorical ? 'categorical' : 'choropleth');
+  if (min === null && max === null && !categories.length) return null;
+  return {
+    min:min,
+    max:max,
+    count:stats.non_null_count || stats.count || categories.length,
+    categories:categories
+  };
+}
+
+function finiteStatistic(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 function getColorRamp(scheme){
   var ramps = {reds:['#fee5d9','#fcae91','#fb6a4a','#de2d26','#a50f15'],greens:['#e5f5e0','#a1d99b','#74c476','#31a354','#006d2c'],viridis:['#440154','#414487','#2a788e','#22a884','#7ad151'],rainbow:['#440154','#3b528b','#21918c','#5ec962','#fde725'],blues:['#eff3ff','#bdd7e7','#6baed6','#3182bd','#08519c']};
+  if (scheme === 'current' && currentStyleColors && currentStyleColors.length) {
+    var current = currentStyleColors.slice();
+    while (current.length < 5) current.push(current[current.length-1]);
+    return current;
+  }
   return ramps[scheme] || ramps.blues;
 }
 function buildChoroplethExpression(attr, stats, scheme){
   var c = getColorRamp(scheme), mn = stats.min, mx = stats.max;
-  if (!isFinite(mn) || !isFinite(mx) || mn === mx) return null;
+  if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn === mx) return null;
   var s = (mx-mn)/4;
   return ['interpolate',['linear'],['to-number',['get',attr]],mn,c[0],mn+s,c[1],mn+2*s,c[2],mn+3*s,c[3],mx,c[4]];
 }
 function buildSizeExpression(attr, stats, base){
-  if (!isFinite(stats.min) || !isFinite(stats.max) || stats.min === stats.max) return null;
+  if (!Number.isFinite(stats.min) || !Number.isFinite(stats.max) || stats.min === stats.max) return null;
   return ['interpolate',['linear'],['to-number',['get',attr]],stats.min,base*0.6,stats.max,base*2.2];
 }
 function buildCategoricalExpression(attr, stats, scheme){
   var c = getColorRamp(scheme), cats = stats.categories || [];
   if (!cats.length) return null;
-  var e = ['match',['get',attr]];
-  cats.forEach(function(x, i){ e.push(x, c[i%c.length]); });
-  e.push('#d3d3d3');
+  var e = ['match',['to-string',['get',attr]]];
+  cats.forEach(function(x, i){ e.push(String(x), c[i%c.length]); });
+  e.push('#9e9e9e');
   return e;
 }
 function _applyPolygonStyle(attr, viz, stats, scheme){
@@ -1386,6 +1643,7 @@ darkToggle.addEventListener('click', function(){
 
 function toggleStylePanel() {
   if (!currentDatasetInfo) { alert('Select a dataset first'); return; }
+  if (!stylePanelEl.classList.contains('visible')) syncStylePanelFromDocument(activeDatasetStyle.document);
   stylePanelEl.classList.toggle('visible');
 }
 
@@ -1513,7 +1771,7 @@ function escapeHtml(value){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
           model:model,
-          messages:[{role:'system', content:'You are a GIS visualization assistant. Suggest JSON style blocks when useful.'},{role:'user', content:'Current map context:\n'+getCtx()}].concat(_hist.slice(-10)),
+          messages:[{role:'system', content:'You are a GIS visualization assistant. Express every suggested map style as a complete MapLibre Style Specification v8 JSON document with sources and layers.'},{role:'user', content:'Current map context:\n'+getCtx()}].concat(_hist.slice(-10)),
           stream:false
         })
       });
@@ -1535,6 +1793,12 @@ function escapeHtml(value){
   }
   window.aiApplyStyle = function(){
     if (!_pending || !currentDatasetInfo) return;
+    if (_pending.version === 8 && Array.isArray(_pending.layers)) {
+      applyLocalStyleDocument(_pending);
+      addMsg('info', 'Style applied locally.');
+      _pending = null;
+      return;
+    }
     function setSelect(id, value){
       var el = document.getElementById(id);
       if (!el || !value) return;

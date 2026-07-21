@@ -304,10 +304,15 @@ additional types such as raster tiles without clients guessing from URLs.
 `GET /datasets/<ID>/style.json` returns a complete MapLibre v8 style document.
 Data-driven `match`, `step`, and `interpolate` expressions identify styled
 attributes and preserve category or range semantics for clients such as the
-frontend legend renderer. Automatically generated categorical styles are kept
-only when their explicitly styled values account for at least 80% of all
-dataset records according to the stored statistics; otherwise the API returns
-a constant geometry color without a categorical legend.
+frontend legend renderer. The browser uses the same document to initialize
+Styling Options and records user changes in a local MapLibre v8 document; it
+never writes those changes back to the catalog. User-created ramps and
+categories use the full-dataset attribute statistics from the dataset detail
+response, never values sampled from the current map viewport. Automatically
+generated categorical styles are kept only when their explicitly styled values
+account for at least 80% of all dataset records according to the stored
+statistics; otherwise the API returns a constant geometry color without a
+categorical legend.
 
 For backward compatibility, `<ID>` falls back to the dataset directory name if
 no UUID matches.
