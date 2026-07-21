@@ -423,6 +423,27 @@ class DatasetCatalog:
             )
         return self.get(dataset["id"])
 
+    def update_metadata(
+        self, dataset_id_or_name: str, metadata: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Merge additional dataset metadata into metadata_json."""
+        dataset = self.get(dataset_id_or_name)
+        if dataset is None:
+            return None
+        merged = {**(dataset.get("metadata_json") or {}), **metadata}
+        self.init_db()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE datasets
+                SET metadata_json = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (json.dumps(merged), dataset["id"]),
+            )
+        return self.get(dataset["id"])
+
     def register_source(
         self,
         name: str,
@@ -745,6 +766,8 @@ class DatasetCatalog:
             "type": visualization_type,
             "url": visualization_url,
         }
+        if "max_zoom" in metadata:
+            visualization["max_zoom"] = metadata["max_zoom"]
 
         return {
             "id": dataset_id,
@@ -777,6 +800,14 @@ class DatasetCatalog:
     @staticmethod
     def _upsert(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         """Insert or update one dataset row while preserving source fields when possible."""
+        existing = conn.execute(
+            "SELECT metadata_json FROM datasets WHERE name = ?",
+            (row["name"],),
+        ).fetchone()
+        if existing is not None:
+            incoming_metadata = row.get("metadata_json") or {}
+            existing_metadata = json.loads(existing["metadata_json"] or "{}")
+            row["metadata_json"] = {**existing_metadata, **incoming_metadata}
         conn.execute(
             """
             INSERT INTO datasets (
@@ -872,9 +903,11 @@ def decode_row(row: sqlite3.Row) -> dict[str, Any]:
     if "visualization_url" in result:
         visualization_type = result.pop("visualization_type")
         visualization_url = result.pop("visualization_url")
+        metadata = result.get("metadata_json") or {}
         result["visualization"] = visualization_metadata(
             visualization_type,
             visualization_url,
+            max_zoom=metadata.get("max_zoom"),
         )
     if "style_json" in result:
         result["style"] = result.pop("style_json")
@@ -1035,7 +1068,11 @@ def merge_attribute_descriptions(
     return merged
 
 
-def visualization_metadata(visualization_type: Any, url: Any) -> dict[str, Any]:
+def visualization_metadata(
+    visualization_type: Any,
+    url: Any,
+    max_zoom: int | None = None,
+) -> dict[str, Any]:
     """Build the discriminated API object used by map clients."""
     result = {"type": visualization_type, "url": url}
     if visualization_type == "VectorTile":
@@ -1046,6 +1083,8 @@ def visualization_metadata(visualization_type: Any, url: Any) -> dict[str, Any]:
                 "source_layer": VECTOR_SOURCE_LAYER,
             }
         )
+        if max_zoom is not None:
+            result["max_zoom"] = max_zoom
     elif visualization_type == "GeoJSON":
         result.update({"format": "geojson", "download_url": url})
     return result
@@ -1372,12 +1411,13 @@ def structured_properties(value: Any) -> dict[str, Any]:
 def maplibre_source(visualization: dict[str, Any]) -> dict[str, Any]:
     if visualization.get("type") == "GeoJSON":
         return {"type": "geojson", "data": visualization.get("url") or ""}
-    return {
+    source = {
         "type": "vector",
         "tiles": [visualization.get("url") or ""],
-        "minzoom": 0,
-        "maxzoom": 14,
     }
+    if "max_zoom" in visualization:
+        source["maxzoom"] = visualization["max_zoom"]
+    return source
 
 
 def normalize_maplibre_layer(

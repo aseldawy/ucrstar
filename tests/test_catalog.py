@@ -49,6 +49,88 @@ def test_catalog_sync_keeps_stable_id(tmp_path: Path, monkeypatch) -> None:
     assert catalog.get("roads")["repository_id"] == repositories[0]["id"]
 
 
+def test_catalog_sync_merges_metadata_without_deleting_existing_keys(
+    tmp_path: Path, monkeypatch
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "roads").mkdir(parents=True)
+    db_path = tmp_path / "catalog.sqlite"
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10 * 1024 * 1024,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+            "zoom_levels": [],
+            "generated_at": "new",
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "description": "Road network",
+            "geometry": [{"geom_types": {"LineString": 4}, "total_points": 20}],
+            "attributes": [],
+        },
+    )
+
+    catalog = DatasetCatalog(db_path, datasets_dir)
+    dataset = catalog.sync()[0]
+    catalog.update_metadata(dataset["id"], {"max_zoom": 19, "generated_at": "old"})
+
+    synced = catalog.sync()[0]
+    detail = catalog.get("roads")
+
+    assert synced["metadata_json"]["max_zoom"] == 19
+    assert synced["metadata_json"]["generated_at"] == "new"
+    assert detail["visualization"]["max_zoom"] == 19
+
+
+def test_catalog_omits_vector_zoom_when_starlet_metadata_has_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "roads").mkdir(parents=True)
+    db_path = tmp_path / "catalog.sqlite"
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10 * 1024 * 1024,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+            "zoom_levels": [],
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "description": "Road network",
+            "geometry": [{"geom_types": {"LineString": 4}, "total_points": 20}],
+            "attributes": [],
+        },
+    )
+
+    detail = DatasetCatalog(db_path, datasets_dir).sync()[0]
+    catalog = DatasetCatalog(db_path, datasets_dir)
+    visualization = catalog.get(detail["id"])["visualization"]
+    source = catalog.style(detail["id"])["sources"]["dataset"]
+
+    assert "min_zoom" not in visualization
+    assert "max_zoom" not in visualization
+    assert "minzoom" not in source
+    assert "maxzoom" not in source
+
+
 def test_catalog_tracks_repository_and_filters_datasets(tmp_path: Path) -> None:
     catalog = DatasetCatalog(tmp_path / "catalog.sqlite", tmp_path / "datasets")
     repository = catalog.upsert_repository(

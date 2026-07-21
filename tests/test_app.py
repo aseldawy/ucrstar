@@ -148,6 +148,7 @@ def test_dataset_tiles_endpoint_uses_nested_dataset_url(
             "has_mvt": False,
             "has_pmtiles": True,
             "mvt_tile_count": 12,
+            "max_zoom": 19,
         },
     )
     monkeypatch.setattr(
@@ -179,9 +180,54 @@ def test_dataset_tiles_endpoint_uses_nested_dataset_url(
     )
     assert detail["visualization"]["tiles"] == [detail["visualization"]["url"]]
     assert detail["visualization"]["source_layer"] == "layer0"
+    assert detail["visualization"]["max_zoom"] == 19
     assert response.status_code == 200
     assert response.data == b"tile"
     assert response.mimetype == "application/vnd.mapbox-vector-tile"
+
+
+def test_vector_style_endpoint_uses_dataset_max_zoom(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "roads").mkdir(parents=True)
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10 * 1024 * 1024,
+            "bbox": [0, 0, 1, 1],
+            "has_mvt": True,
+            "max_zoom": 19,
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "description": "Road centerlines",
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+        }
+    )
+
+    client = app.test_client()
+    dataset = client.get("/datasets.json").get_json()["datasets"][0]
+    style = client.get(f"/datasets/{dataset['id']}/style.json").get_json()
+
+    assert style["sources"]["dataset"]["maxzoom"] == 19
 
 
 def test_dataset_style_endpoint(tmp_path: Path, monkeypatch) -> None:

@@ -335,6 +335,8 @@ def build_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
     build_kwargs: dict[str, Any] = {}
     if args.zoom is not None:
         build_kwargs["zoom"] = args.zoom
+    else:
+        build_kwargs["zoom"] = int(starlet.get_config()["mvt"]["zoom"])
     build_kwargs["covering_bbox"] = not bool(args.no_covering_bbox)
     if args.pmtiles is not None:
         build_kwargs["pmtiles"] = args.pmtiles
@@ -947,6 +949,7 @@ def process_registered_dataset(
             persist_source_copy(Path(datasets_dir) / dataset["name"], prepared)
         write_source_summary(Path(datasets_dir) / dataset["name"], prepared.source)
         catalog.sync()
+        catalog.update_metadata(dataset["name"], {"max_zoom": int(build_kwargs["zoom"])})
         processed = catalog.get(dataset["name"])
         if processed is None:
             raise RuntimeError(f"Dataset was built but not found in catalog: {dataset['name']}")
@@ -1002,10 +1005,12 @@ def sync_source_and_enrich(
     catalog: DatasetCatalog,
     dataset_name: str,
     source: dict[str, Any],
+    build_kwargs: dict[str, Any],
     project_config: dict[str, Any],
 ) -> dict[str, Any]:
     LOGGER.info("Syncing catalog metadata")
     catalog.sync()
+    catalog.update_metadata(dataset_name, {"max_zoom": int(build_kwargs["zoom"])})
     dataset = catalog.get(dataset_name)
     if dataset is None:
         raise RuntimeError(f"Dataset was built but not found in catalog: {dataset_name}")
@@ -1245,7 +1250,13 @@ def refresh_dataset(
             write_source_summary(temp_dir, prepared.source)
             swap_dataset_dirs(dataset_dir, temp_dir, backup_dir)
             cleanup_dataset_dir(datasets_root, backup_name)
-            refreshed = sync_source_and_enrich(catalog, name, prepared.source, project_config)
+            refreshed = sync_source_and_enrich(
+                catalog,
+                name,
+                prepared.source,
+                build_kwargs,
+                project_config,
+            )
             LOGGER.info("Refreshed dataset %s with ID %s.", refreshed["name"], refreshed["id"])
             return refreshed
         finally:

@@ -264,9 +264,19 @@ function visualizationSource(visualization) {
     return {type:'geojson', data:absoluteDatasetUrl(visualization.url)};
   }
   if (visualization.type === 'VectorTile') {
-    return {type:'vector', tiles:[absoluteDatasetUrl(visualization.url)], minzoom:0, maxzoom:14};
+    var source = {type:'vector', tiles:[absoluteDatasetUrl(visualization.url)]};
+    var minZoom = numericZoom(visualization.min_zoom);
+    var maxZoom = numericZoom(visualization.max_zoom);
+    if (minZoom !== null) source.minzoom = minZoom;
+    if (maxZoom !== null) source.maxzoom = maxZoom;
+    return source;
   }
   throw new Error('Unsupported visualization type: ' + (visualization.type || 'missing'));
+}
+
+function numericZoom(value) {
+  var zoom = Number(value);
+  return Number.isFinite(zoom) ? zoom : null;
 }
 
 function absoluteDatasetUrl(url) {
