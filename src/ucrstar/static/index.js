@@ -29,6 +29,7 @@ var isApplyingUrl = false;
 var skipNextUrlUpdate = false;
 var basemapMode = 'street';
 var currentDatasetBounds = null;
+var currentTileAttributesKey = '';
 
 var searchForm = document.getElementById('searchForm');
 var searchInput = document.getElementById('searchInput');
@@ -233,12 +234,8 @@ async function loadMapDataset(dataset, options) {
   activeDatasetStyle = await fetchDatasetStyle(dataset);
   var visualization = dataset.visualization || {};
   sourceLayer = visualization.source_layer || SOURCE_LAYER;
-  map.addSource(DATASET_SOURCE, visualizationSource(visualization));
-  var layerSource = visualization.type === 'VectorTile' ? {'source-layer':sourceLayer} : {};
-  addStyledLayer(Object.assign({id:'fill', type:'fill', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:activeDatasetStyle.layers.fill}, layerSource), FALLBACK_STYLE.layers.fill);
-  addStyledLayer(Object.assign({id:'outline', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:activeDatasetStyle.layers.line}, layerSource), FALLBACK_STYLE.layers.line);
-  addStyledLayer(Object.assign({id:'points', type:'circle', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Point'], paint:activeDatasetStyle.layers.circle}, layerSource), FALLBACK_STYLE.layers.circle);
-  addStyledLayer(Object.assign({id:'lines', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'LineString'], paint:activeDatasetStyle.layers.line}, layerSource), FALLBACK_STYLE.layers.line);
+  currentTileAttributesKey = tileAttributesKey(tileAttributesForStyle(activeDatasetStyle.document));
+  addDatasetSourceAndLayers(visualization, activeDatasetStyle.layers);
 
   attachClickableCursors();
   populateAttributeSelect();
@@ -264,7 +261,7 @@ function visualizationSource(visualization) {
     return {type:'geojson', data:absoluteDatasetUrl(visualization.url)};
   }
   if (visualization.type === 'VectorTile') {
-    var source = {type:'vector', tiles:[absoluteDatasetUrl(visualization.url)]};
+    var source = {type:'vector', tiles:[vectorTileUrl(visualization.url)]};
     var minZoom = numericZoom(visualization.min_zoom);
     var maxZoom = numericZoom(visualization.max_zoom);
     if (minZoom !== null) source.minzoom = minZoom;
@@ -272,6 +269,81 @@ function visualizationSource(visualization) {
     return source;
   }
   throw new Error('Unsupported visualization type: ' + (visualization.type || 'missing'));
+}
+
+function addDatasetSourceAndLayers(visualization, paints) {
+  map.addSource(DATASET_SOURCE, visualizationSource(visualization));
+  var layerSource = visualization.type === 'VectorTile' ? {'source-layer':sourceLayer} : {};
+  addStyledLayer(Object.assign({id:'fill', type:'fill', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:clone(paints.fill)}, layerSource), FALLBACK_STYLE.layers.fill);
+  addStyledLayer(Object.assign({id:'outline', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:clone(paints.line)}, layerSource), FALLBACK_STYLE.layers.line);
+  addStyledLayer(Object.assign({id:'points', type:'circle', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Point'], paint:clone(paints.circle)}, layerSource), FALLBACK_STYLE.layers.circle);
+  addStyledLayer(Object.assign({id:'lines', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'LineString'], paint:clone(paints.line)}, layerSource), FALLBACK_STYLE.layers.line);
+}
+
+function vectorTileUrl(url) {
+  var absoluteUrl = absoluteDatasetUrl(url);
+  if (!currentTileAttributesKey) return absoluteUrl;
+  var separator = absoluteUrl.indexOf('?') === -1 ? '?' : '&';
+  return absoluteUrl + separator + 'attributes=' + encodeURIComponent(currentTileAttributesKey);
+}
+
+function updateVectorTileAttributes(attributes) {
+  if (!map || !currentDatasetInfo) return;
+  var visualization = currentDatasetInfo.visualization || {};
+  if (visualization.type !== 'VectorTile') return;
+  var key = tileAttributesKey(attributes);
+  if (key === currentTileAttributesKey) return;
+  currentTileAttributesKey = key;
+  var paints = currentMapPaints();
+  clearDatasetLayer();
+  addDatasetSourceAndLayers(visualization, paints);
+  attachClickableCursors();
+  _scheduleRender();
+}
+
+function currentMapPaints() {
+  var paints = clone(activeDatasetStyle.layers);
+  [['fill','fill'], ['outline','line'], ['points','circle'], ['lines','line']].forEach(function(pair){
+    var layerId = pair[0], layerType = pair[1];
+    if (!map.getLayer(layerId)) return;
+    Object.keys(paints[layerType]).forEach(function(property){
+      try {
+        var value = map.getPaintProperty(layerId, property);
+        if (value !== undefined) paints[layerType][property] = value;
+      } catch(e) {}
+    });
+  });
+  return paints;
+}
+
+function tileAttributesForStyle(style, extraAttributes) {
+  var names = {};
+  function add(name) {
+    if (typeof name === 'string' && name && name !== 'geometry') names[name] = true;
+  }
+  collectStyleAttributes(style, add);
+  (extraAttributes || []).forEach(add);
+  return Object.keys(names).sort();
+}
+
+function tileAttributesKey(attributes) {
+  var names = {};
+  (attributes || []).forEach(function(value){
+    if (typeof value === 'string' && value) names[value] = true;
+  });
+  return Object.keys(names).sort().join(',');
+}
+
+function collectStyleAttributes(value, add) {
+  if (!value) return;
+  if (Array.isArray(value)) {
+    if ((value[0] === 'get' || value[0] === 'has') && typeof value[1] === 'string') add(value[1]);
+    value.forEach(function(item){ collectStyleAttributes(item, add); });
+    return;
+  }
+  if (typeof value === 'object') {
+    Object.keys(value).forEach(function(key){ collectStyleAttributes(value[key], add); });
+  }
 }
 
 function numericZoom(value) {
@@ -997,6 +1069,7 @@ function resetStyleToServerDefault() {
   if (document.getElementById('labelBg')) document.getElementById('labelBg').value = 'white';
   resetToDefaultStyle();
   resetLegend();
+  updateVectorTileAttributes(tileAttributesForStyle(activeDatasetStyle.document));
 }
 
 function resetLegend() {
@@ -1100,6 +1173,7 @@ function applyStyle(){
   var viz = (document.getElementById('vizType') || {value:'choropleth'}).value;
   var scheme = (document.getElementById('colorScheme') || {value:'blues'}).value;
   var labelAttr = (document.getElementById('labelSelect') || {value:''}).value;
+  var requestedAttributes = tileAttributesForStyle(activeDatasetStyle.document, [attr, labelAttr]);
   if (!attr) {
     resetToDefaultStyle();
     resetLegend();
@@ -1117,6 +1191,7 @@ function applyStyle(){
       }
     }
   }
+  updateVectorTileAttributes(requestedAttributes);
   applyLabels(labelAttr, (document.getElementById('labelSize') || {value:'12'}).value, (document.getElementById('labelColor') || {value:'#202124'}).value);
 }
 

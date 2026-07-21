@@ -159,7 +159,13 @@ def test_dataset_tiles_endpoint_uses_nested_dataset_url(
             "attributes": [],
         },
     )
-    monkeypatch.setattr("starlet.get_tile", lambda dataset, z, x, y: b"tile")
+    tile_calls = []
+
+    def fake_get_tile(dataset, z, x, y, attributes=None):
+        tile_calls.append((dataset, z, x, y, attributes))
+        return b"tile"
+
+    monkeypatch.setattr("starlet.get_tile", fake_get_tile)
 
     app = create_app(
         {
@@ -184,6 +190,61 @@ def test_dataset_tiles_endpoint_uses_nested_dataset_url(
     assert response.status_code == 200
     assert response.data == b"tile"
     assert response.mimetype == "application/vnd.mapbox-vector-tile"
+    assert tile_calls == [(datasets_dir / "counties", 1, 2, 3, None)]
+
+
+def test_dataset_tiles_endpoint_forwards_requested_attributes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "counties").mkdir(parents=True)
+    tile_calls = []
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["counties"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "name": "counties",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10 * 1024 * 1024,
+            "bbox": [-1, -2, 3, 4],
+            "has_mvt": False,
+            "has_pmtiles": True,
+            "mvt_tile_count": 12,
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {"geometry": [], "attributes": []},
+    )
+
+    def fake_get_tile(dataset, z, x, y, attributes=None):
+        tile_calls.append((dataset, z, x, y, attributes))
+        return b"tile"
+
+    monkeypatch.setattr("starlet.get_tile", fake_get_tile)
+
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+        }
+    )
+
+    client = app.test_client()
+    dataset = client.get("/datasets.json").get_json()["datasets"][0]
+    response = client.get(
+        f"/datasets/{dataset['id']}/tiles/1/2/3.mvt?attributes=name,population,, name"
+    )
+
+    assert response.status_code == 200
+    assert response.data == b"tile"
+    assert tile_calls == [
+        (datasets_dir / "counties", 1, 2, 3, ["name", "population"])
+    ]
 
 
 def test_vector_style_endpoint_uses_dataset_max_zoom(

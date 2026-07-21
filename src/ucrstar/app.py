@@ -251,7 +251,19 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         dataset = require_dataset(dataset_ref)
         if isinstance(dataset, Response):
             return dataset
-        data = starlet.get_tile(dataset_path(dataset["name"]), z, x, y)
+        attributes_arg = request.args.get("attributes")
+        attributes = (
+            list(
+                dict.fromkeys(
+                    attr.strip() for attr in attributes_arg.split(",") if attr.strip()
+                )
+            )
+            if attributes_arg
+            else None
+        )
+        data = starlet.get_tile(
+            dataset_path(dataset["name"]), z, x, y, attributes=attributes
+        )
         return Response(data, mimetype="application/vnd.mapbox-vector-tile")
 
     @app.get("/<path:filename>")
