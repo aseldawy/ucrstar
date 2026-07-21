@@ -70,6 +70,8 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/")
     def index() -> Response:
+        if not current_app.debug:
+            abort(404)
         return send_from_directory(app.static_folder, "index.html")
 
     @app.errorhandler(ValueError)

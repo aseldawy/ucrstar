@@ -224,6 +224,7 @@ def test_frontend_index_is_served(tmp_path: Path) -> None:
     app = create_app(
         {
             "TESTING": True,
+            "DEBUG": True,
             "DATASETS_DIR": tmp_path / "datasets",
             "DATABASE": tmp_path / "instance" / "test.sqlite",
         }
@@ -233,24 +234,23 @@ def test_frontend_index_is_served(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert b"maplibre-gl" in response.data
-    assert b"/static/app.js" in response.data
+    assert b"/static/index.css" in response.data
+    assert b"/static/index.js" in response.data
 
 
-def test_debug_static_fallback_serves_alternate_mvt_frontend(tmp_path: Path) -> None:
+def test_frontend_index_is_debug_only(tmp_path: Path) -> None:
     app = create_app(
         {
             "TESTING": True,
-            "DEBUG": True,
+            "DEBUG": False,
             "DATASETS_DIR": tmp_path / "datasets",
             "DATABASE": tmp_path / "instance" / "test.sqlite",
         }
     )
 
-    response = app.test_client().get("/view_mvt.html")
+    response = app.test_client().get("/")
 
-    assert response.status_code == 200
-    assert b"/static/view_mvt.css" in response.data
-    assert b"/static/view_mvt.js" in response.data
+    assert response.status_code == 404
 
 
 def test_static_fallback_is_debug_only(tmp_path: Path) -> None:
@@ -263,7 +263,7 @@ def test_static_fallback_is_debug_only(tmp_path: Path) -> None:
         }
     )
 
-    response = app.test_client().get("/view_mvt.html")
+    response = app.test_client().get("/index.html")
 
     assert response.status_code == 404
 

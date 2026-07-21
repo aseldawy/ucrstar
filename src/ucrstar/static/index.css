@@ -1344,7 +1344,7 @@ body.dark {
 
 .download-format-select:focus { border-color: var(--accent); }
 
-/* New view_mvt layout */
+/* Main frontend layout */
 :root {
   --viewer-panel-width: min(430px, calc(100vw - 32px));
 }
