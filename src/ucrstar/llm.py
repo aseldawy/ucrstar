@@ -111,8 +111,17 @@ class LLMClient:
             "Return compact JSON that improves this geospatial dataset catalog entry. "
             f"Dataset descriptions must be at most {self.settings.max_description_chars} characters. "
             "Use keys: description, attributes, style. attributes is an object keyed by field name "
-            "with short human-readable descriptions. style is a MapLibre paint style object with "
-            "source_layer and layers.fill/layers.line/layers.circle paint dictionaries. Dataset:\n"
+            "with short human-readable descriptions. style must be a MapLibre Style Specification "
+            "v8 document with a sources object and layers array. Use MapLibre get/match/interpolate "
+            "expressions so the styled attributes and category or range meanings remain machine-readable. "
+            "Never classify features by cosmetic storage fields whose names or values describe colors, "
+            "RGB, or hex codes. Use a meaningful category such as a name, type, class, or status and use "
+            "colors only as expression outputs. For categorical match expressions, include every category "
+            "supported by the supplied statistics and use an explicit fallback color for all other values. "
+            "Only choose a categorical style when its explicit categories account for at least 80 percent "
+            "of all dataset records according to the supplied counts. Otherwise use a constant color. "
+            "When source_style contains an Esri renderer, translate its fields, values, labels, and colors "
+            "into equivalent MapLibre expressions and include ucrstar:legend metadata when useful. Dataset:\n"
             + json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         )
         result = self.complete_json(prompt)
@@ -429,10 +438,16 @@ def builtin_enrichment(prompt: str, max_description_chars: int) -> dict[str, Any
         readable = str(field_name).replace("_", " ").replace("-", " ")
         attributes[field_name] = trim_text(f"{readable.title()} attribute ({field_type}).", 160)
 
+    source_style = payload.get("source_style") or {}
+    translated_style = (
+        esri_renderer_style(source_style.get("renderer"), geometry_types)
+        if source_style.get("format") == "esri-renderer"
+        else None
+    )
     return {
         "description": description,
         "attributes": attributes,
-        "style": style_for_geometry_types(geometry_types),
+        "style": translated_style or style_for_geometry_types(geometry_types),
     }
 
 
@@ -459,3 +474,95 @@ def style_for_geometry_types(geometry_types: list[str]) -> dict[str, Any]:
     elif any("point" in value for value in lower_types):
         style["layers"]["circle"].update({"circle-color": "#b84a62", "circle-radius": 4.5})
     return style
+
+
+def esri_renderer_style(
+    renderer: Any, geometry_types: list[str]
+) -> dict[str, Any] | None:
+    """Translate common Esri renderers into machine-readable MapLibre expressions."""
+    if not isinstance(renderer, dict):
+        return None
+    style = style_for_geometry_types(geometry_types)
+    layer_type, color_property = primary_color_property(geometry_types)
+    renderer_type = str(renderer.get("type") or "").lower()
+    field = renderer.get("field1") or renderer.get("field")
+
+    if renderer_type == "uniquevalue" and field:
+        entries = renderer.get("uniqueValueInfos") or []
+        expression: list[Any] = ["match", ["get", field]]
+        labels: dict[str, str] = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or "value" not in entry:
+                continue
+            value = entry["value"]
+            expression.extend([value, esri_symbol_color(entry.get("symbol"), "#808080")])
+            labels[str(value)] = str(entry.get("label") or value)
+        expression.append(esri_symbol_color(renderer.get("defaultSymbol"), "#bdbdbd"))
+        style["layers"][layer_type][color_property] = expression
+        style["metadata"] = {
+            "ucrstar:legend": {
+                "type": "categorical",
+                "property": field,
+                "labels": labels,
+            }
+        }
+        return style
+
+    if renderer_type == "classbreaks" and field:
+        entries = renderer.get("classBreakInfos") or []
+        default_color = esri_symbol_color(renderer.get("defaultSymbol"), "#d9d9d9")
+        stops = []
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("classMaxValue") is None:
+                continue
+            maximum = entry["classMaxValue"]
+            color = esri_symbol_color(entry.get("symbol"), default_color)
+            stops.append({"value": maximum, "label": entry.get("label"), "color": color})
+        expression: list[Any] = [
+            "step",
+            ["to-number", ["get", field]],
+            stops[0]["color"] if stops else default_color,
+        ]
+        for index in range(1, len(stops)):
+            expression.extend([stops[index - 1]["value"], stops[index]["color"]])
+        style["layers"][layer_type][color_property] = expression
+        style["metadata"] = {
+            "ucrstar:legend": {
+                "type": "gradient",
+                "property": field,
+                "stops": stops,
+            }
+        }
+        return style
+
+    if renderer_type == "simple":
+        style["layers"][layer_type][color_property] = esri_symbol_color(
+            renderer.get("symbol"),
+            style["layers"][layer_type].get(color_property, "#808080"),
+        )
+        return style
+    return None
+
+
+def primary_color_property(geometry_types: list[str]) -> tuple[str, str]:
+    values = " ".join(geometry_types).lower()
+    if "polygon" in values:
+        return "fill", "fill-color"
+    if "line" in values:
+        return "line", "line-color"
+    return "circle", "circle-color"
+
+
+def esri_symbol_color(symbol: Any, default: str) -> str:
+    if not isinstance(symbol, dict):
+        return default
+    color = symbol.get("color")
+    if not isinstance(color, list) or len(color) < 3:
+        outline = symbol.get("outline") or {}
+        color = outline.get("color")
+    if not isinstance(color, list) or len(color) < 3:
+        return default
+    red, green, blue = (max(0, min(255, int(value))) for value in color[:3])
+    if len(color) > 3 and int(color[3]) < 255:
+        return f"rgba({red},{green},{blue},{max(0, min(255, int(color[3]))) / 255:.3f})"
+    return f"#{red:02x}{green:02x}{blue:02x}"

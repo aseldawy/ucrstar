@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import math
@@ -19,6 +20,32 @@ DATASET_STATES = {"created", "downloaded", "processed", "ready", "published", "e
 PROCESSABLE_STATES = {"created", "downloaded", "processed", "ready", "error"}
 DEFAULT_REPOSITORY_SHORT_NAME = "default"
 DEFAULT_REPOSITORY_URL = "ucrstar://default"
+GEOJSON_MAX_BYTES = 1_000_000
+STYLE_SOURCE_ID = "dataset"
+VECTOR_SOURCE_LAYER = "layer0"
+CATEGORICAL_MIN_COVERAGE = 0.8
+CATEGORICAL_COLORS = [
+    "#4477aa",
+    "#ee6677",
+    "#228833",
+    "#ccbb44",
+    "#66ccee",
+    "#aa3377",
+    "#bbbbbb",
+    "#000000",
+    "#e69f00",
+    "#56b4e9",
+    "#009e73",
+    "#f0e442",
+    "#0072b2",
+    "#d55e00",
+    "#cc79a7",
+    "#332288",
+    "#88ccee",
+    "#44aa99",
+    "#999933",
+    "#882255",
+]
 
 
 SCHEMA_SQL = """
@@ -550,11 +577,11 @@ class DatasetCatalog:
             return [decode_row(row) for row in conn.execute(sql, values)]
 
     def style(self, dataset_id_or_name: str) -> dict[str, Any] | None:
-        """Return the normalized MapLibre style for a dataset."""
+        """Return the complete MapLibre style document for a dataset."""
         dataset = self.get(dataset_id_or_name)
         if dataset is None:
             return None
-        return normalize_style(dataset.get("style"), dataset.get("geometry_types"))
+        return normalize_style(dataset.get("style"), dataset.get("geometry_types"), dataset)
 
     def enrich(self, dataset_id_or_name: str, llm: Any) -> dict[str, Any] | None:
         """Use an LLM to improve descriptions, schema text, style, and embeddings."""
@@ -576,7 +603,11 @@ class DatasetCatalog:
             dataset.get("schema") or [],
             enrichment.get("attributes") or {},
         )
-        style = normalize_style(enrichment.get("style"), dataset.get("geometry_types"))
+        style = normalize_style(
+            enrichment.get("style"),
+            dataset.get("geometry_types"),
+            dataset,
+        )
 
         search_text = embedding_text(
             {
@@ -694,18 +725,32 @@ class DatasetCatalog:
                 num_features = sum(int(v) for v in geom_counts.values())
 
         schema = _schema_from_summary(summary)
-        visualization_type = "MVT" if metadata.get("has_mvt") else None
-        visualization_url = (
-            f"/datasets/{dataset_id}/tiles" + "/{z}/{x}/{y}.mvt"
-            if visualization_type == "MVT"
-            else None
+        size_bytes = int(metadata.get("size_bytes") or 0)
+        use_geojson = size_bytes < GEOJSON_MAX_BYTES
+        has_vector_tiles = bool(
+            metadata.get("has_mvt")
+            or metadata.get("has_pmtiles")
+            or int(metadata.get("mvt_tile_count") or 0) > 0
         )
+        visualization_type = (
+            "GeoJSON" if use_geojson else "VectorTile" if has_vector_tiles else None
+        )
+        if visualization_type == "GeoJSON":
+            visualization_url = f"/datasets/{dataset_id}/download.geojson"
+        elif visualization_type == "VectorTile":
+            visualization_url = f"/datasets/{dataset_id}/tiles" + "/{z}/{x}/{y}.mvt"
+        else:
+            visualization_url = None
+        visualization = {
+            "type": visualization_type,
+            "url": visualization_url,
+        }
 
         return {
             "id": dataset_id,
             "name": name,
             "description": summary.get("description"),
-            "size_bytes": int(metadata.get("size_bytes") or 0),
+            "size_bytes": size_bytes,
             "num_features": num_features,
             "num_coordinates": num_coordinates,
             "geometry_types": sorted(geom_types),
@@ -714,7 +759,15 @@ class DatasetCatalog:
             "citation_json": summary.get("citation"),
             "visualization_type": visualization_type,
             "visualization_url": visualization_url,
-            "style_json": fallback_style(sorted(geom_types)),
+            "style_json": normalize_style(
+                fallback_style(sorted(geom_types)),
+                sorted(geom_types),
+                {
+                    "id": dataset_id,
+                    "name": name,
+                    "visualization": visualization,
+                },
+            ),
             "dataset_state": "published",
             "error_message": None,
             "metadata_json": metadata,
@@ -817,10 +870,12 @@ def decode_row(row: sqlite3.Row) -> dict[str, Any]:
     if "citation_json" in result:
         result["citation"] = result.pop("citation_json")
     if "visualization_url" in result:
-        result["visualization"] = {
-            "type": result.pop("visualization_type"),
-            "url": result.pop("visualization_url"),
-        }
+        visualization_type = result.pop("visualization_type")
+        visualization_url = result.pop("visualization_url")
+        result["visualization"] = visualization_metadata(
+            visualization_type,
+            visualization_url,
+        )
     if "style_json" in result:
         result["style"] = result.pop("style_json")
     if "source_type" in result:
@@ -980,17 +1035,410 @@ def merge_attribute_descriptions(
     return merged
 
 
-def normalize_style(style: Any, geometry_types: list[str] | None) -> dict[str, Any]:
-    """Merge a partial/generated style with the default style for the geometry."""
-    base = fallback_style(geometry_types)
-    if not isinstance(style, dict):
-        return base
-    if isinstance(style.get("layers"), dict):
+def visualization_metadata(visualization_type: Any, url: Any) -> dict[str, Any]:
+    """Build the discriminated API object used by map clients."""
+    result = {"type": visualization_type, "url": url}
+    if visualization_type == "VectorTile":
+        result.update(
+            {
+                "format": "mvt",
+                "tiles": [url],
+                "source_layer": VECTOR_SOURCE_LAYER,
+            }
+        )
+    elif visualization_type == "GeoJSON":
+        result.update({"format": "geojson", "download_url": url})
+    return result
+
+
+def normalize_style(
+    style: Any,
+    geometry_types: list[str] | None,
+    dataset: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a complete, dataset-bound MapLibre Style Specification document."""
+    dataset = dataset or {}
+    visualization = dataset.get("visualization") or {
+        "type": "VectorTile",
+        "url": "",
+        "source_layer": VECTOR_SOURCE_LAYER,
+    }
+    source = maplibre_source(visualization)
+    paints = fallback_style(geometry_types).get("layers", {})
+
+    if isinstance(style, dict) and isinstance(style.get("layers"), dict):
         for layer_type in ("fill", "line", "circle"):
             paint = normalize_layer_paint(style["layers"].get(layer_type), layer_type)
             if paint:
-                base["layers"][layer_type].update(paint)
-    return base
+                paints[layer_type].update(paint)
+
+    layers = style.get("layers") if isinstance(style, dict) else None
+    if isinstance(layers, list):
+        normalized_layers = [
+            normalize_maplibre_layer(layer, visualization)
+            for layer in layers
+            if isinstance(layer, dict)
+            and layer.get("type") in {"fill", "line", "circle", "symbol"}
+        ]
+        normalized_layers = [layer for layer in normalized_layers if layer]
+    else:
+        normalized_layers = default_maplibre_layers(paints, visualization)
+
+    metadata = dict(style.get("metadata") or {}) if isinstance(style, dict) else {}
+    repair_cosmetic_categorical_style(normalized_layers, metadata, dataset)
+    reject_low_coverage_categorical_styles(
+        normalized_layers,
+        metadata,
+        dataset,
+        paints,
+    )
+    return {
+        "version": 8,
+        "name": str(style.get("name") or dataset.get("name") or "UCR Star dataset")
+        if isinstance(style, dict)
+        else str(dataset.get("name") or "UCR Star dataset"),
+        "metadata": metadata,
+        "sources": {STYLE_SOURCE_ID: source},
+        "layers": normalized_layers or default_maplibre_layers(paints, visualization),
+    }
+
+
+def repair_cosmetic_categorical_style(
+    layers: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    dataset: dict[str, Any],
+) -> None:
+    """Replace categories based on color-storage fields with semantic categories."""
+    cosmetic_property = None
+    for layer in layers:
+        for property_name in ("fill-color", "line-color", "circle-color"):
+            expression = (layer.get("paint") or {}).get(property_name)
+            candidate = categorical_expression_property(expression)
+            if candidate and is_cosmetic_color_field(candidate):
+                cosmetic_property = candidate
+                break
+        if cosmetic_property:
+            break
+    if not cosmetic_property:
+        return
+
+    category = semantic_category(dataset, excluded={cosmetic_property})
+    if category is None:
+        return
+    field, values = category
+    expression: list[Any] = ["match", ["get", field]]
+    for index, value in enumerate(values):
+        expression.extend([value, CATEGORICAL_COLORS[index % len(CATEGORICAL_COLORS)]])
+    expression.append("#bdbdbd")
+
+    for layer in layers:
+        paint = layer.get("paint") or {}
+        for property_name in ("fill-color", "line-color", "circle-color"):
+            current = paint.get(property_name)
+            if categorical_expression_property(current) == cosmetic_property:
+                paint[property_name] = expression
+    metadata["ucrstar:legend"] = {
+        "type": "categorical",
+        "property": field,
+        "labels": {str(value): str(value) for value in values},
+    }
+
+
+def categorical_expression_property(expression: Any) -> str | None:
+    if not isinstance(expression, list) or len(expression) < 3 or expression[0] != "match":
+        return None
+    input_expression = expression[1]
+    if (
+        isinstance(input_expression, list)
+        and len(input_expression) >= 2
+        and input_expression[0] == "get"
+        and isinstance(input_expression[1], str)
+    ):
+        return input_expression[1]
+    return None
+
+
+def is_cosmetic_color_field(field: str) -> bool:
+    normalized = field.lower().replace("-", "_")
+    return any(token in normalized for token in ("color", "colour", "rgb", "hex"))
+
+
+def semantic_category(
+    dataset: dict[str, Any], excluded: set[str]
+) -> tuple[str, list[Any]] | None:
+    summary = dataset.get("summary_json") or {}
+    schema = {field.get("name"): field for field in dataset.get("schema") or []}
+    candidates = []
+    for attribute in summary.get("attributes") or []:
+        name = attribute.get("name")
+        values = [entry.get("value") for entry in attribute.get("top_k") or []]
+        values = [value for value in values if value is not None]
+        distinct = int(attribute.get("approx_distinct") or len(values))
+        if not name or name in excluded or not values or distinct < 2 or distinct > 30:
+            continue
+        searchable = " ".join(
+            str(value).lower()
+            for value in (
+                name,
+                attribute.get("description"),
+                (schema.get(name) or {}).get("description"),
+            )
+            if value
+        )
+        if any(token in searchable for token in ("url", "address", "phone")):
+            continue
+        score = 0
+        for token, weight in (
+            ("name", 8),
+            ("office", 7),
+            ("category", 6),
+            ("class", 5),
+            ("type", 4),
+            ("label", 4),
+            ("status", 3),
+            ("code", 1),
+        ):
+            if token in searchable:
+                score += weight
+        score += max(0, 30 - distinct) / 30
+        candidates.append((score, name, values))
+    if not candidates:
+        return None
+    _score, name, values = max(candidates, key=lambda candidate: candidate[0])
+    return name, values
+
+
+def reject_low_coverage_categorical_styles(
+    layers: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    dataset: dict[str, Any],
+    fallback_paints: dict[str, Any],
+) -> None:
+    """Remove inferred categorical colors unless they demonstrably cover 80% of records."""
+    rejected_properties: set[str] = set()
+    for layer in layers:
+        layer_type = layer.get("type")
+        paint = layer.get("paint") or {}
+        color_property = {
+            "fill": "fill-color",
+            "line": "line-color",
+            "circle": "circle-color",
+        }.get(layer_type)
+        if not color_property:
+            continue
+        expression = paint.get(color_property)
+        styled_paths = categorical_expression_paths(expression)
+        if not styled_paths:
+            continue
+        coverage = categorical_path_coverage(dataset, styled_paths)
+        if coverage is None or coverage < CATEGORICAL_MIN_COVERAGE:
+            paint[color_property] = fallback_paints[layer_type][color_property]
+            for path in styled_paths:
+                rejected_properties.update(path)
+
+    legend = metadata.get("ucrstar:legend")
+    if isinstance(legend, dict) and legend.get("property") in rejected_properties:
+        metadata.pop("ucrstar:legend", None)
+
+
+def categorical_expression_values(expression: Any) -> set[Any]:
+    if not isinstance(expression, list) or expression[0] != "match":
+        return set()
+    values: set[Any] = set()
+    for index in range(2, len(expression) - 1, 2):
+        value = expression[index]
+        if isinstance(value, list):
+            values.update(item for item in value if isinstance(item, str | int | float | bool))
+        elif isinstance(value, str | int | float | bool):
+            values.add(value)
+    return values
+
+
+def categorical_expression_paths(expression: Any) -> list[dict[str, Any]]:
+    property_name = categorical_expression_property(expression)
+    if not property_name:
+        return []
+    return match_expression_paths(expression, {}, property_name)
+
+
+def match_expression_paths(
+    expression: list[Any], parent_path: dict[str, Any], property_name: str
+) -> list[dict[str, Any]]:
+    paths: list[dict[str, Any]] = []
+    for index in range(2, len(expression) - 1, 2):
+        value = expression[index]
+        output = expression[index + 1]
+        values = value if isinstance(value, list) else [value]
+        for option in values:
+            if not isinstance(option, str | int | float | bool):
+                continue
+            path = {**parent_path, property_name: option}
+            if isinstance(output, str):
+                paths.append(path)
+            elif isinstance(output, list) and output and output[0] == "match":
+                nested_property = categorical_expression_property(output)
+                if nested_property:
+                    paths.extend(match_expression_paths(output, path, nested_property))
+    return paths
+
+
+def categorical_path_coverage(
+    dataset: dict[str, Any], styled_paths: list[dict[str, Any]]
+) -> float | None:
+    if not styled_paths:
+        return None
+    property_names = {name for path in styled_paths for name in path}
+    if len(property_names) == 1:
+        property_name = next(iter(property_names))
+        categories = {path[property_name] for path in styled_paths}
+        return categorical_coverage(dataset, property_name, categories)
+
+    total_records = int(dataset.get("num_features") or 0)
+    if total_records <= 0:
+        return None
+    attributes = (dataset.get("summary_json") or {}).get("attributes") or []
+    covered = 0
+    found_properties = False
+    for attribute in attributes:
+        for entry in attribute.get("top_k") or []:
+            properties = structured_properties(entry.get("value"))
+            if not properties:
+                continue
+            if property_names.issubset(properties):
+                found_properties = True
+            if any(
+                all(properties.get(name) == expected for name, expected in path.items())
+                for path in styled_paths
+            ):
+                covered += int(entry.get("count") or 0)
+    return covered / total_records if found_properties else None
+
+
+def categorical_coverage(
+    dataset: dict[str, Any], property_name: str, categories: set[Any]
+) -> float | None:
+    total_records = int(dataset.get("num_features") or 0)
+    if total_records <= 0 or not categories:
+        return None
+    attributes = (dataset.get("summary_json") or {}).get("attributes") or []
+
+    direct = next(
+        (attribute for attribute in attributes if attribute.get("name") == property_name),
+        None,
+    )
+    if direct is not None:
+        covered = sum(
+            int(entry.get("count") or 0)
+            for entry in direct.get("top_k") or []
+            if entry.get("value") in categories
+        )
+        return covered / total_records
+
+    covered = 0
+    found_property = False
+    for attribute in attributes:
+        for entry in attribute.get("top_k") or []:
+            mapped_value = structured_property_value(entry.get("value"), property_name)
+            if mapped_value is None:
+                continue
+            found_property = True
+            if mapped_value in categories:
+                covered += int(entry.get("count") or 0)
+    return covered / total_records if found_property else None
+
+
+def structured_property_value(value: Any, property_name: str) -> Any:
+    return structured_properties(value).get(property_name)
+
+
+def structured_properties(value: Any) -> dict[str, Any]:
+    structured = value
+    if isinstance(value, str):
+        try:
+            structured = ast.literal_eval(value)
+        except (SyntaxError, ValueError):
+            return {}
+    if isinstance(structured, dict):
+        return structured
+    if isinstance(structured, list):
+        properties = {}
+        for item in structured:
+            if isinstance(item, tuple | list) and len(item) == 2 and isinstance(item[0], str):
+                properties[item[0]] = item[1]
+        return properties
+    return {}
+
+
+def maplibre_source(visualization: dict[str, Any]) -> dict[str, Any]:
+    if visualization.get("type") == "GeoJSON":
+        return {"type": "geojson", "data": visualization.get("url") or ""}
+    return {
+        "type": "vector",
+        "tiles": [visualization.get("url") or ""],
+        "minzoom": 0,
+        "maxzoom": 14,
+    }
+
+
+def normalize_maplibre_layer(
+    layer: dict[str, Any], visualization: dict[str, Any]
+) -> dict[str, Any] | None:
+    layer_type = layer.get("type")
+    layer_id = layer.get("id")
+    if not isinstance(layer_id, str) or not layer_id:
+        return None
+    normalized = {"id": layer_id, "type": layer_type, "source": STYLE_SOURCE_ID}
+    if visualization.get("type") == "VectorTile":
+        normalized["source-layer"] = visualization.get("source_layer") or VECTOR_SOURCE_LAYER
+    for key in ("minzoom", "maxzoom", "filter", "layout"):
+        if key in layer:
+            normalized[key] = layer[key]
+    if layer_type in {"fill", "line", "circle"}:
+        normalized["paint"] = normalize_layer_paint(layer.get("paint"), layer_type)
+    elif isinstance(layer.get("paint"), dict):
+        normalized["paint"] = layer["paint"]
+    return normalized
+
+
+def default_maplibre_layers(
+    paints: dict[str, Any], visualization: dict[str, Any]
+) -> list[dict[str, Any]]:
+    source_layer = (
+        {"source-layer": visualization.get("source_layer") or VECTOR_SOURCE_LAYER}
+        if visualization.get("type") == "VectorTile"
+        else {}
+    )
+    common = {"source": STYLE_SOURCE_ID, **source_layer}
+    return [
+        {
+            "id": "fill",
+            "type": "fill",
+            **common,
+            "filter": ["==", ["geometry-type"], "Polygon"],
+            "paint": paints["fill"],
+        },
+        {
+            "id": "outline",
+            "type": "line",
+            **common,
+            "filter": ["==", ["geometry-type"], "Polygon"],
+            "paint": paints["line"],
+        },
+        {
+            "id": "lines",
+            "type": "line",
+            **common,
+            "filter": ["==", ["geometry-type"], "LineString"],
+            "paint": paints["line"],
+        },
+        {
+            "id": "points",
+            "type": "circle",
+            **common,
+            "filter": ["==", ["geometry-type"], "Point"],
+            "paint": paints["circle"],
+        },
+    ]
 
 
 def normalize_layer_paint(layer_style: Any, layer_type: str) -> dict[str, Any]:
@@ -1023,7 +1471,7 @@ def is_supported_paint_property(key: Any, value: Any, layer_type: str) -> bool:
 def enrichment_payload(dataset: dict[str, Any]) -> dict[str, Any]:
     """Build the compact dataset payload sent to the LLM enrichment step."""
     summary = dataset.get("summary_json") or {}
-    return {
+    payload = {
         "id": dataset.get("id"),
         "name": dataset.get("name"),
         "description": dataset.get("description"),
@@ -1038,6 +1486,13 @@ def enrichment_payload(dataset: dict[str, Any]) -> dict[str, Any]:
             "geometry": summary.get("geometry", []),
         },
     }
+    source_metadata = (dataset.get("source") or {}).get("metadata") or {}
+    hub_metadata = source_metadata.get("hub") or {}
+    layer_metadata = hub_metadata.get("layer") or source_metadata.get("layer") or {}
+    renderer = (layer_metadata.get("drawingInfo") or {}).get("renderer")
+    if isinstance(renderer, dict):
+        payload["source_style"] = {"format": "esri-renderer", "renderer": renderer}
+    return payload
 
 
 def embedding_text(dataset: dict[str, Any]) -> str:

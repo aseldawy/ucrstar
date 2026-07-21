@@ -117,11 +117,14 @@ def test_catalog_enriches_style_and_embedding(tmp_path: Path, monkeypatch) -> No
         },
     )
 
+    seen_payload = {}
+
     class FakeLLM:
         enabled = True
         embedding_key = "fake:test-embed"
 
         def enrich_dataset(self, payload):
+            seen_payload.update(payload)
             return {
                 "description": "Road centerline dataset.",
                 "attributes": {"road_name": "Street name."},
@@ -133,11 +136,36 @@ def test_catalog_enriches_style_and_embedding(tmp_path: Path, monkeypatch) -> No
 
     catalog = DatasetCatalog(db_path, datasets_dir)
     dataset = catalog.sync()[0]
+    catalog.update_source(
+        dataset["id"],
+        {
+            "type": "esri_hub",
+            "url": "https://example.com/item",
+            "metadata": {
+                "hub": {
+                    "layer": {
+                        "drawingInfo": {
+                            "renderer": {"type": "uniqueValue", "field1": "road_name"}
+                        }
+                    }
+                }
+            },
+        },
+    )
     enriched = catalog.enrich(dataset["id"], FakeLLM())
 
     assert enriched["description"] == "Road centerline dataset."
     assert enriched["schema"][0]["description"] == "Street name."
-    assert catalog.style(dataset["id"])["layers"]["line"]["line-color"] == "#111111"
+    assert enriched["style"]["version"] == 8
+    assert enriched["style"]["sources"]["dataset"]["type"] == "geojson"
+    style = catalog.style(dataset["id"])
+    assert style["version"] == 8
+    line_layer = next(layer for layer in style["layers"] if layer["id"] == "lines")
+    assert line_layer["paint"]["line-color"] == "#111111"
+    assert seen_payload["source_style"] == {
+        "format": "esri-renderer",
+        "renderer": {"type": "uniqueValue", "field1": "road_name"},
+    }
     assert catalog.semantic_search("streets", FakeLLM(), {}, limit=5)[0]["id"] == dataset["id"]
     deleted = catalog.delete(dataset["id"])
 
@@ -172,16 +200,317 @@ def test_normalize_style_flattens_nested_paint_and_ignores_source_layer() -> Non
 
     normalized = normalize_style(style, ["Point"])
 
-    assert normalized["source_layer"] == "layer0"
-    assert normalized["layers"]["fill"] == {
+    assert normalized["version"] == 8
+    assert normalized["sources"]["dataset"]["type"] == "vector"
+    layers = {layer["id"]: layer for layer in normalized["layers"]}
+    assert layers["fill"]["source-layer"] == "layer0"
+    assert layers["fill"]["paint"] == {
         "fill-color": "#add8e6",
         "fill-opacity": 0.5,
     }
-    assert normalized["layers"]["line"]["line-color"] == "#808080"
-    assert normalized["layers"]["line"]["line-width"] == 2
-    assert "paint" not in normalized["layers"]["line"]
-    assert normalized["layers"]["circle"]["circle-color"] == "#808080"
-    assert normalized["layers"]["circle"]["circle-radius"] == 5
+    assert layers["lines"]["paint"]["line-color"] == "#808080"
+    assert layers["lines"]["paint"]["line-width"] == 2
+    assert "paint" not in layers["lines"]["paint"]
+    assert layers["points"]["paint"]["circle-color"] == "#808080"
+    assert layers["points"]["paint"]["circle-radius"] == 5
+
+
+def test_normalize_style_replaces_cosmetic_color_category_with_semantic_field() -> None:
+    style = {
+        "version": 8,
+        "layers": [
+            {
+                "id": "areas",
+                "type": "fill",
+                "paint": {
+                    "fill-color": [
+                        "match",
+                        ["get", "color_egis"],
+                        "Blue - RGB 0,0,255",
+                        "rgb(0,0,255)",
+                        "Red - RGB 255,0,0",
+                        "rgb(255,0,0)",
+                        "#ccc",
+                    ]
+                },
+            }
+        ],
+    }
+    dataset = {
+        "name": "service_areas",
+        "num_features": 12,
+        "schema": [
+            {"name": "dcfsoffice", "description": "Name of the assigned office."},
+            {"name": "color_egis", "description": "Assigned display color."},
+        ],
+        "summary_json": {
+            "attributes": [
+                {
+                    "name": "dcfsoffice",
+                    "role": "categorical_text",
+                    "approx_distinct": 3,
+                    "top_k": [
+                        {"value": "North", "count": 5},
+                        {"value": "Central", "count": 4},
+                        {"value": "South", "count": 3},
+                    ],
+                },
+                {
+                    "name": "color_egis",
+                    "role": "categorical_text",
+                    "approx_distinct": 2,
+                    "top_k": [
+                        {"value": "Blue - RGB 0,0,255", "count": 7},
+                        {"value": "Red - RGB 255,0,0", "count": 5},
+                    ],
+                },
+            ]
+        },
+        "visualization": {"type": "GeoJSON", "url": "/areas.geojson"},
+    }
+
+    normalized = normalize_style(style, ["Polygon"], dataset)
+
+    expression = normalized["layers"][0]["paint"]["fill-color"]
+    assert expression[0:2] == ["match", ["get", "dcfsoffice"]]
+    assert expression[2::2][:-1] == ["North", "Central", "South"]
+    assert normalized["metadata"]["ucrstar:legend"] == {
+        "type": "categorical",
+        "property": "dcfsoffice",
+        "labels": {"North": "North", "Central": "Central", "South": "South"},
+    }
+
+
+def test_normalize_style_rejects_categorical_style_below_80_percent_coverage() -> None:
+    style = {
+        "version": 8,
+        "metadata": {
+            "ucrstar:legend": {"type": "categorical", "property": "religion"}
+        },
+        "layers": [
+            {
+                "id": "places",
+                "type": "circle",
+                "paint": {
+                    "circle-color": [
+                        "match",
+                        ["get", "religion"],
+                        "christian",
+                        "#00aa00",
+                        "muslim",
+                        "#0000aa",
+                        "#808080",
+                    ]
+                },
+            }
+        ],
+    }
+    dataset = {
+        "name": "places",
+        "num_features": 100,
+        "summary_json": {
+            "attributes": [
+                {
+                    "name": "tagsMap",
+                    "top_k": [
+                        {
+                            "value": "[('religion', 'christian'), ('name', 'A')]",
+                            "count": 35,
+                        },
+                        {
+                            "value": "[('religion', 'muslim'), ('name', 'B')]",
+                            "count": 20,
+                        },
+                        {"value": "[('name', 'C')]", "count": 45},
+                    ],
+                }
+            ]
+        },
+        "visualization": {"type": "GeoJSON", "url": "/places.geojson"},
+    }
+
+    normalized = normalize_style(style, ["Point"], dataset)
+
+    assert normalized["layers"][0]["paint"]["circle-color"] == "#d1495b"
+    assert "ucrstar:legend" not in normalized["metadata"]
+
+
+def test_normalize_style_keeps_categorical_style_at_80_percent_coverage() -> None:
+    style = {
+        "version": 8,
+        "layers": [
+            {
+                "id": "areas",
+                "type": "fill",
+                "paint": {
+                    "fill-color": [
+                        "match",
+                        ["get", "zone"],
+                        "residential",
+                        "#00aa00",
+                        "commercial",
+                        "#0000aa",
+                        "#808080",
+                    ]
+                },
+            }
+        ],
+    }
+    dataset = {
+        "name": "zones",
+        "num_features": 100,
+        "summary_json": {
+            "attributes": [
+                {
+                    "name": "zone",
+                    "top_k": [
+                        {"value": "residential", "count": 60},
+                        {"value": "commercial", "count": 20},
+                        {"value": "other", "count": 20},
+                    ],
+                }
+            ]
+        },
+        "visualization": {"type": "GeoJSON", "url": "/zones.geojson"},
+    }
+
+    normalized = normalize_style(style, ["Polygon"], dataset)
+
+    assert normalized["layers"][0]["paint"]["fill-color"] == style["layers"][0]["paint"]["fill-color"]
+
+
+def test_normalize_style_rejects_nested_categorical_style_below_leaf_coverage() -> None:
+    style = {
+        "version": 8,
+        "metadata": {
+            "ucrstar:legend": {"type": "categorical", "property": "religion"}
+        },
+        "layers": [
+            {
+                "id": "places",
+                "type": "circle",
+                "paint": {
+                    "circle-color": [
+                        "match",
+                        ["get", "religion"],
+                        "christian",
+                        [
+                            "match",
+                            ["get", "denomination"],
+                            "catholic",
+                            "#7fc97f",
+                            "orthodox",
+                            "#33a02c",
+                            "#4daf4a",
+                        ],
+                        "muslim",
+                        [
+                            "match",
+                            ["get", "denomination"],
+                            "sunni",
+                            "#80b1d3",
+                            "#377eb8",
+                        ],
+                        "jewish",
+                        "#ffd700",
+                        "#808080",
+                    ]
+                },
+            }
+        ],
+    }
+    dataset = {
+        "name": "cemeteries",
+        "num_features": 100,
+        "summary_json": {
+            "attributes": [
+                {
+                    "name": "tagsMap",
+                    "top_k": [
+                        {
+                            "value": "[('religion', 'christian'), ('denomination', 'catholic')]",
+                            "count": 10,
+                        },
+                        {
+                            "value": "[('religion', 'christian'), ('denomination', 'orthodox')]",
+                            "count": 5,
+                        },
+                        {
+                            "value": "[('religion', 'christian'), ('denomination', 'protestant')]",
+                            "count": 70,
+                        },
+                        {"value": "[('religion', 'jewish')]", "count": 3},
+                        {"value": "[('amenity', 'grave_yard')]", "count": 12},
+                    ],
+                }
+            ]
+        },
+        "visualization": {"type": "GeoJSON", "url": "/cemeteries.geojson"},
+    }
+
+    normalized = normalize_style(style, ["Point"], dataset)
+
+    assert normalized["layers"][0]["paint"]["circle-color"] == "#d1495b"
+    assert "ucrstar:legend" not in normalized["metadata"]
+
+
+def test_normalize_style_keeps_nested_categorical_style_at_leaf_coverage() -> None:
+    style = {
+        "version": 8,
+        "layers": [
+            {
+                "id": "places",
+                "type": "circle",
+                "paint": {
+                    "circle-color": [
+                        "match",
+                        ["get", "religion"],
+                        "christian",
+                        [
+                            "match",
+                            ["get", "denomination"],
+                            "catholic",
+                            "#7fc97f",
+                            "orthodox",
+                            "#33a02c",
+                            "#4daf4a",
+                        ],
+                        "jewish",
+                        "#ffd700",
+                        "#808080",
+                    ]
+                },
+            }
+        ],
+    }
+    dataset = {
+        "name": "cemeteries",
+        "num_features": 100,
+        "summary_json": {
+            "attributes": [
+                {
+                    "name": "tagsMap",
+                    "top_k": [
+                        {
+                            "value": "[('religion', 'christian'), ('denomination', 'catholic')]",
+                            "count": 50,
+                        },
+                        {
+                            "value": "[('religion', 'christian'), ('denomination', 'orthodox')]",
+                            "count": 20,
+                        },
+                        {"value": "[('religion', 'jewish')]", "count": 10},
+                        {"value": "[('religion', 'christian')]", "count": 20},
+                    ],
+                }
+            ]
+        },
+        "visualization": {"type": "GeoJSON", "url": "/cemeteries.geojson"},
+    }
+
+    normalized = normalize_style(style, ["Point"], dataset)
+
+    assert normalized["layers"][0]["paint"]["circle-color"] == style["layers"][0]["paint"]["circle-color"]
 
 
 def test_normalize_schema_type_simplifies_esri_field_types() -> None:

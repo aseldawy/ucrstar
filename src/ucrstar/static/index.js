@@ -231,23 +231,19 @@ async function loadMapDataset(dataset, options) {
   resetLegend();
   _detachLabelRenderer();
   activeDatasetStyle = await fetchDatasetStyle(dataset);
-  sourceLayer = activeDatasetStyle.source_layer || SOURCE_LAYER;
-
-  var tileRef = dataset.id || dataset.name;
-  map.addSource(DATASET_SOURCE, {
-    type:'vector',
-    tiles:[window.location.origin+'/datasets/'+encodeURIComponent(tileRef)+'/tiles/{z}/{x}/{y}.mvt'],
-    minzoom:0,
-    maxzoom:14
-  });
-  addStyledLayer({id:'fill', type:'fill', source:DATASET_SOURCE, 'source-layer':sourceLayer, filter:['any',['==',['geometry-type'],'Polygon'],['==',['geometry-type'],'MultiPolygon']], paint:activeDatasetStyle.layers.fill}, FALLBACK_STYLE.layers.fill);
-  addStyledLayer({id:'outline', type:'line', source:DATASET_SOURCE, 'source-layer':sourceLayer, filter:['any',['==',['geometry-type'],'Polygon'],['==',['geometry-type'],'MultiPolygon']], paint:activeDatasetStyle.layers.line}, FALLBACK_STYLE.layers.line);
-  addStyledLayer({id:'points', type:'circle', source:DATASET_SOURCE, 'source-layer':sourceLayer, filter:['==',['geometry-type'],'Point'], paint:activeDatasetStyle.layers.circle}, FALLBACK_STYLE.layers.circle);
-  addStyledLayer({id:'lines', type:'line', source:DATASET_SOURCE, 'source-layer':sourceLayer, filter:['any',['==',['geometry-type'],'LineString'],['==',['geometry-type'],'MultiLineString']], paint:activeDatasetStyle.layers.line}, FALLBACK_STYLE.layers.line);
+  var visualization = dataset.visualization || {};
+  sourceLayer = visualization.source_layer || SOURCE_LAYER;
+  map.addSource(DATASET_SOURCE, visualizationSource(visualization));
+  var layerSource = visualization.type === 'VectorTile' ? {'source-layer':sourceLayer} : {};
+  addStyledLayer(Object.assign({id:'fill', type:'fill', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:activeDatasetStyle.layers.fill}, layerSource), FALLBACK_STYLE.layers.fill);
+  addStyledLayer(Object.assign({id:'outline', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:activeDatasetStyle.layers.line}, layerSource), FALLBACK_STYLE.layers.line);
+  addStyledLayer(Object.assign({id:'points', type:'circle', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Point'], paint:activeDatasetStyle.layers.circle}, layerSource), FALLBACK_STYLE.layers.circle);
+  addStyledLayer(Object.assign({id:'lines', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'LineString'], paint:activeDatasetStyle.layers.line}, layerSource), FALLBACK_STYLE.layers.line);
 
   attachClickableCursors();
   populateAttributeSelect();
   populateLabelSelect();
+  renderStyleLegend(activeDatasetStyle.document);
 
   var geomText = ((dataset.geometry_types || []).join(' ') || '').toUpperCase();
   var hasPoint = geomText.indexOf('POINT') !== -1;
@@ -263,6 +259,24 @@ async function loadMapDataset(dataset, options) {
   updateZoomAllState();
 }
 
+function visualizationSource(visualization) {
+  if (visualization.type === 'GeoJSON') {
+    return {type:'geojson', data:absoluteDatasetUrl(visualization.url)};
+  }
+  if (visualization.type === 'VectorTile') {
+    return {type:'vector', tiles:[absoluteDatasetUrl(visualization.url)], minzoom:0, maxzoom:14};
+  }
+  throw new Error('Unsupported visualization type: ' + (visualization.type || 'missing'));
+}
+
+function absoluteDatasetUrl(url) {
+  if (typeof url !== 'string' || !url) throw new Error('Visualization URL is missing');
+  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return url;
+  if (url.indexOf('//') === 0) return window.location.protocol + url;
+  if (url.charAt(0) === '/') return window.location.origin + url;
+  return window.location.origin + '/' + url;
+}
+
 async function fetchDatasetStyle(dataset) {
   try {
     var style = await fetchJson('/datasets/'+encodeURIComponent(dataset.id || dataset.name)+'/style.json');
@@ -274,13 +288,106 @@ async function fetchDatasetStyle(dataset) {
 
 function normalizeDatasetStyle(style) {
   var normalized = clone(FALLBACK_STYLE);
-  if (style && style.source_layer) normalized.source_layer = style.source_layer;
-  if (!style || !style.layers) return normalized;
-  ['fill','line','circle'].forEach(function(type){
-    var paint = normalizeLayerPaint(style.layers[type], type);
-    Object.keys(paint).forEach(function(key){ normalized.layers[type][key] = paint[key]; });
+  normalized.document = style;
+  if (!style || !Array.isArray(style.layers)) return normalized;
+  style.layers.forEach(function(layer){
+    if (!layer || ['fill','line','circle'].indexOf(layer.type) === -1) return;
+    var paint = normalizeLayerPaint(layer.paint, layer.type);
+    Object.keys(paint).forEach(function(key){ normalized.layers[layer.type][key] = paint[key]; });
   });
   return normalized;
+}
+
+function renderStyleLegend(style) {
+  resetLegend();
+  if (!style || !Array.isArray(style.layers)) return;
+  var metadata = style.metadata && style.metadata['ucrstar:legend'];
+  var entry = findLegendExpression(style.layers);
+  if (!entry && !metadata) return;
+  var legend = legendFromExpression(entry && entry.expression, metadata || {});
+  if (!legend || !legend.items.length) return;
+  legendEl.querySelector('.legend-title').textContent = legend.title || 'Legend';
+  legend.items.forEach(function(item){
+    var row = document.createElement('div');
+    row.className = 'legend-item';
+    var swatch = document.createElement('div');
+    swatch.className = 'legend-color';
+    swatch.style.background = item.color;
+    var label = document.createElement('span');
+    label.textContent = item.label;
+    row.appendChild(swatch);
+    row.appendChild(label);
+    legendContentEl.appendChild(row);
+  });
+  legendEl.classList.add('visible');
+}
+
+function findLegendExpression(layers) {
+  var properties = ['fill-color','line-color','circle-color'];
+  for (var i=0; i<layers.length; i++) {
+    var paint = layers[i] && layers[i].paint || {};
+    for (var j=0; j<properties.length; j++) {
+      if (Array.isArray(paint[properties[j]])) return {expression:paint[properties[j]]};
+    }
+  }
+  return null;
+}
+
+function legendFromExpression(expression, metadata) {
+  var property = metadata.property || expressionProperty(expression);
+  var labels = metadata.labels || {};
+  var items = [];
+  if (Array.isArray(metadata.stops) && metadata.stops.length) {
+    items = metadata.stops.map(function(stop){
+      return {label:String(stop.label || formatLegendValue(stop.value)), color:stop.color};
+    });
+  } else if (Array.isArray(expression) && expression[0] === 'match') {
+    items = legendItemsFromMatch(expression, labels, '');
+  } else if (Array.isArray(expression) && (expression[0] === 'interpolate' || expression[0] === 'step')) {
+    var start = 3;
+    if (expression[0] === 'step') items.push({label:'Below first break', color:expression[2]});
+    for (var j=start; j<expression.length-1; j+=2) {
+      if (typeof expression[j+1] === 'string') items.push({label:formatLegendValue(expression[j]), color:expression[j+1]});
+    }
+  }
+  return {title:property || 'Legend', items:items.filter(function(item){ return typeof item.color === 'string'; })};
+}
+
+function legendItemsFromMatch(expression, labels, parentLabel) {
+  var items = [];
+  for (var i=2; i<expression.length-1; i+=2) {
+    var value = expression[i];
+    var output = expression[i+1];
+    var valueLabel = String(labels[String(value)] || value);
+    var label = parentLabel ? parentLabel + ' / ' + valueLabel : valueLabel;
+    if (typeof output === 'string') {
+      items.push({label:label, color:output});
+    } else if (Array.isArray(output) && output[0] === 'match') {
+      items = items.concat(legendItemsFromMatch(output, {}, label));
+    }
+  }
+  var fallback = expression[expression.length-1];
+  if (typeof fallback === 'string') {
+    items.push({
+      label:parentLabel ? parentLabel + ' / other' : 'Other / unspecified',
+      color:fallback
+    });
+  }
+  return items;
+}
+
+function expressionProperty(expression) {
+  if (!Array.isArray(expression)) return null;
+  if (expression[0] === 'get' && typeof expression[1] === 'string') return expression[1];
+  for (var i=1; i<expression.length; i++) {
+    var property = expressionProperty(expression[i]);
+    if (property) return property;
+  }
+  return null;
+}
+
+function formatLegendValue(value) {
+  return typeof value === 'number' ? Number(value.toFixed(2)).toLocaleString() : String(value);
 }
 
 function normalizeLayerPaint(layerStyle, layerType) {
@@ -885,6 +992,7 @@ function resetStyleToServerDefault() {
 function resetLegend() {
   if (legendEl) {
     legendEl.classList.remove('visible');
+    legendEl.scrollTop = 0;
     legendContentEl.innerHTML = '';
   }
 }

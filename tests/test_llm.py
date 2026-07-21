@@ -41,6 +41,66 @@ def test_integrated_builtin_enriches_without_external_server() -> None:
     assert len(embedding) == 16
 
 
+def test_integrated_builtin_translates_esri_unique_value_renderer() -> None:
+    llm = llm_from_config(
+        {
+            "llm": {
+                "enabled": True,
+                "provider": "integrated",
+                "providers": {
+                    "integrated": {
+                        "backend": "builtin",
+                        "chat_model": "builtin-heuristic",
+                        "embedding_model": "builtin-hash",
+                    }
+                },
+            }
+        }
+    )
+
+    enrichment = llm.enrich_dataset(
+        {
+            "name": "zoning",
+            "geometry_types": ["Polygon"],
+            "schema": [{"name": "ZONE", "type": "text"}],
+            "source_style": {
+                "format": "esri-renderer",
+                "renderer": {
+                    "type": "uniqueValue",
+                    "field1": "ZONE",
+                    "uniqueValueInfos": [
+                        {
+                            "value": "R1",
+                            "label": "Residential",
+                            "symbol": {"color": [20, 120, 220, 255]},
+                        },
+                        {
+                            "value": "C1",
+                            "label": "Commercial",
+                            "symbol": {"color": [230, 80, 40, 255]},
+                        },
+                    ],
+                },
+            },
+        }
+    )
+
+    expression = enrichment["style"]["layers"]["fill"]["fill-color"]
+    assert expression == [
+        "match",
+        ["get", "ZONE"],
+        "R1",
+        "#1478dc",
+        "C1",
+        "#e65028",
+        "#bdbdbd",
+    ]
+    assert enrichment["style"]["metadata"]["ucrstar:legend"]["labels"] == {
+        "R1": "Residential",
+        "C1": "Commercial",
+    }
+
+
 def test_integrated_model_resolver_reuses_downloaded_model(tmp_path: Path) -> None:
     model_path = (
         tmp_path

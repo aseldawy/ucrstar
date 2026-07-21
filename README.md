@@ -122,7 +122,8 @@ If LLM support is enabled, `add-dataset` also enriches the catalog entry:
 
 - generates a short missing dataset description
 - adds short descriptions for attributes from Starlet stats
-- creates a default MapLibre style
+- creates and stores a complete MapLibre Style Specification v8 document
+- translates Esri renderer metadata into MapLibre expressions when an LLM is enabled
 - stores a dataset embedding for semantic search
 
 ## Refresh Datasets
@@ -292,6 +293,21 @@ If you later install the project in editable mode, the module form also works:
 - `GET /datasets/<ID>/sample.json?MBR=x1,y1,x2,y2`
 - `GET /datasets/<ID>/sample.geojson?MBR=x1,y1,x2,y2`
 - `GET /datasets/<ID>/tiles/<z>/<x>/<y>.mvt`
+
+`GET /datasets/<ID>.json` includes a discriminated `visualization` object. Small
+datasets smaller than 1 MB use `type: "GeoJSON"`; its `url` and
+`download_url` point to the complete GeoJSON export. Larger datasets with MVT
+output use `type: "VectorTile"` and include the tile URL template in both `url`
+and `tiles`, plus the MVT `source_layer`. This object is intended to support
+additional types such as raster tiles without clients guessing from URLs.
+
+`GET /datasets/<ID>/style.json` returns a complete MapLibre v8 style document.
+Data-driven `match`, `step`, and `interpolate` expressions identify styled
+attributes and preserve category or range semantics for clients such as the
+frontend legend renderer. Automatically generated categorical styles are kept
+only when their explicitly styled values account for at least 80% of all
+dataset records according to the stored statistics; otherwise the API returns
+a constant geometry color without a categorical legend.
 
 For backward compatibility, `<ID>` falls back to the dataset directory name if
 no UUID matches.

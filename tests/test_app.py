@@ -143,9 +143,11 @@ def test_dataset_tiles_endpoint_uses_nested_dataset_url(
             "name": "counties",
             "path": str(dataset),
             "exists": True,
-            "size_bytes": 100,
+            "size_bytes": 10 * 1024 * 1024,
             "bbox": [-1, -2, 3, 4],
-            "has_mvt": True,
+            "has_mvt": False,
+            "has_pmtiles": True,
+            "mvt_tile_count": 12,
         },
     )
     monkeypatch.setattr(
@@ -171,9 +173,12 @@ def test_dataset_tiles_endpoint_uses_nested_dataset_url(
     detail = client.get(f"/datasets/{dataset['id']}.json").get_json()
     response = client.get(f"/datasets/{dataset['id']}/tiles/1/2/3.mvt")
 
+    assert detail["visualization"]["type"] == "VectorTile"
     assert detail["visualization"]["url"] == (
         f"/datasets/{dataset['id']}/tiles" + "/{z}/{x}/{y}.mvt"
     )
+    assert detail["visualization"]["tiles"] == [detail["visualization"]["url"]]
+    assert detail["visualization"]["source_layer"] == "layer0"
     assert response.status_code == 200
     assert response.data == b"tile"
     assert response.mimetype == "application/vnd.mapbox-vector-tile"
@@ -217,7 +222,82 @@ def test_dataset_style_endpoint(tmp_path: Path, monkeypatch) -> None:
     response = client.get(f"/datasets/{dataset['id']}/style.json")
 
     assert response.status_code == 200
-    assert response.get_json()["layers"]["fill"]["fill-color"]
+    style = response.get_json()
+    assert style["version"] == 8
+    assert style["sources"]["dataset"] == {
+        "type": "geojson",
+        "data": f"/datasets/{dataset['id']}/download.geojson",
+    }
+    assert next(layer for layer in style["layers"] if layer["id"] == "fill")["paint"]["fill-color"]
+
+
+def test_small_dataset_details_select_geojson_visualization(tmp_path: Path, monkeypatch) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "places").mkdir(parents=True)
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["places"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {"size_bytes": 1024, "bbox": [0, 0, 1, 1], "has_mvt": True},
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "geometry": [{"geom_types": {"Point": 3}, "total_points": 3}],
+            "attributes": [],
+        },
+    )
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": tmp_path / "db.sqlite",
+        }
+    )
+    client = app.test_client()
+    dataset = client.get("/datasets.json").get_json()["datasets"][0]
+    detail = client.get(f"/datasets/{dataset['id']}.json").get_json()
+
+    assert detail["visualization"] == {
+        "type": "GeoJSON",
+        "format": "geojson",
+        "url": f"/datasets/{dataset['id']}/download.geojson",
+        "download_url": f"/datasets/{dataset['id']}/download.geojson",
+    }
+
+
+def test_one_megabyte_dataset_uses_vector_tiles(tmp_path: Path, monkeypatch) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "boundary").mkdir(parents=True)
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["boundary"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "size_bytes": 1_000_000,
+            "bbox": [0, 0, 1, 1],
+            "has_mvt": False,
+            "has_pmtiles": True,
+            "mvt_tile_count": 5,
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "geometry": [{"geom_types": {"Polygon": 3}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": tmp_path / "db.sqlite",
+        }
+    )
+    client = app.test_client()
+    dataset = client.get("/datasets.json").get_json()["datasets"][0]
+    detail = client.get(f"/datasets/{dataset['id']}.json").get_json()
+
+    assert detail["visualization"]["type"] == "VectorTile"
 
 
 def test_frontend_index_is_served(tmp_path: Path) -> None:

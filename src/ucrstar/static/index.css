@@ -563,6 +563,8 @@ input[type="color"].style-input {
   box-shadow: var(--shadow-md);
   display: none;
   max-width: 200px;
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
   backdrop-filter: blur(20px);
 }
 
