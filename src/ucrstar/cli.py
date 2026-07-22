@@ -20,7 +20,7 @@ LOGGER = logging.getLogger(__name__)
 
 if __package__:
     from .app import TimingWSGIRequestHandler, create_app
-    from .catalog import DatasetCatalog
+    from .catalog import DatasetCatalog, dataset_relative_path, validate_dataset_name
     from .config import configure_runtime, load_config
     from .esri_hub import EsriHubClient, HubDataset
     from .llm import llm_from_config
@@ -30,7 +30,7 @@ else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ucrstar.app import create_app
     from ucrstar.app import TimingWSGIRequestHandler
-    from ucrstar.catalog import DatasetCatalog
+    from ucrstar.catalog import DatasetCatalog, dataset_relative_path, validate_dataset_name
     from ucrstar.config import configure_runtime, load_config
     from ucrstar.esri_hub import EsriHubClient, HubDataset
     from ucrstar.llm import llm_from_config
@@ -563,7 +563,10 @@ def add_ezesri_catalog(
             continue
         dataset_name = unique_dataset_name(
             catalog,
-            dataset_name_from_source(source, Path(source["metadata"]["title"])),
+            repository_dataset_name(
+                repository,
+                dataset_name_from_source(source, Path(source["metadata"]["title"])),
+            ),
             source,
             used_names,
             overwrite=overwrite,
@@ -703,6 +706,17 @@ def unique_dataset_name(
     return None
 
 
+def repository_dataset_name(repository: dict[str, Any], dataset_name: str) -> str:
+    prefix = safe_dataset_name_segment(str(repository.get("short_name") or "repository"))
+    leaf = safe_dataset_name_segment(dataset_name)
+    return f"{prefix}/{leaf}"
+
+
+def safe_dataset_name_segment(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")
+    return cleaned[:80] or "dataset"
+
+
 def add_esri_hub_repository(
     catalog: DatasetCatalog,
     repository_url: str,
@@ -742,7 +756,10 @@ def add_esri_hub_repository(
             catalog.set_dataset_repository(existing["id"], repository["id"])
             log_existing_dataset_skip(hub_dataset.title, existing)
             continue
-        dataset_name = dataset_name_from_source(source, Path(hub_dataset.title))
+        dataset_name = repository_dataset_name(
+            repository,
+            dataset_name_from_source(source, Path(hub_dataset.title)),
+        )
         existing = catalog.get(dataset_name)
         if existing is not None:
             catalog.set_dataset_repository(existing["id"], repository["id"])
@@ -1043,15 +1060,16 @@ def process_registered_dataset(
     if not source_url:
         raise ValueError(f"Dataset has no source URL: {dataset['name']}")
 
+    dataset_dir = Path(datasets_dir) / dataset_relative_path(dataset["name"])
     LOGGER.info("Processing dataset '%s' from %s", dataset["name"], source_url)
-    prepared = prepare_dataset_source(Path(datasets_dir) / dataset["name"], source_url, source)
+    prepared = prepare_dataset_source(dataset_dir, source_url, source)
     try:
         if prepared.source.get("type") != "local" and prepared.source.get("url") == source_url:
             catalog.update_state(dataset["id"], "downloaded")
         build_dataset(prepared.path, datasets_dir, dataset["name"], True, build_kwargs)
         if prepared.source.get("type") != "local" and prepared.path.parent.name != "download":
-            persist_source_copy(Path(datasets_dir) / dataset["name"], prepared)
-        write_source_summary(Path(datasets_dir) / dataset["name"], prepared.source)
+            persist_source_copy(dataset_dir, prepared)
+        write_source_summary(dataset_dir, prepared.source)
         catalog.sync()
         catalog.update_metadata(dataset["name"], {"max_zoom": int(build_kwargs["zoom"])})
         processed = catalog.get(dataset["name"])
@@ -1087,6 +1105,9 @@ def build_dataset(
     overwrite: bool,
     build_kwargs: dict[str, Any],
 ) -> None:
+    validate_dataset_name(dataset_name)
+    dataset_dir = Path(datasets_dir) / dataset_relative_path(dataset_name)
+    dataset_dir.parent.mkdir(parents=True, exist_ok=True)
     LOGGER.info("Building Starlet dataset '%s' under %s", dataset_name, datasets_dir)
     starlet.add_dataset(
         str(input_path),
@@ -1101,8 +1122,7 @@ def build_dataset(
 def dataset_name_from_source(source: dict[str, Any], input_path: Path) -> str:
     metadata = source.get("metadata") or {}
     raw_name = metadata.get("title") or input_path.stem
-    name = "".join(char if char.isalnum() or char in "._-" else "_" for char in raw_name)
-    return name.strip("._") or "dataset"
+    return safe_dataset_name_segment(str(raw_name))
 
 
 def sync_source_and_enrich(
@@ -1249,7 +1269,13 @@ def refresh_repository(
         if dataset is None:
             dataset_name = unique_dataset_name(
                 catalog,
-                dataset_name_from_source(source, Path((source.get("metadata") or {}).get("title") or "dataset")),
+                repository_dataset_name(
+                    repository,
+                    dataset_name_from_source(
+                        source,
+                        Path((source.get("metadata") or {}).get("title") or "dataset"),
+                    ),
+                ),
                 source,
                 used_names,
                 overwrite=False,
@@ -1389,7 +1415,7 @@ def swap_dataset_dirs(dataset_dir: Path, temp_dir: Path, backup_dir: Path) -> No
 
 
 def cleanup_dataset_dir(datasets_dir: Path, name: str) -> None:
-    target = datasets_dir / name
+    target = datasets_dir / dataset_relative_path(name)
     if not target.exists():
         return
     try:

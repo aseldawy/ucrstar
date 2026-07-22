@@ -186,6 +186,72 @@ def test_add_dataset_remembers_starlet_config_zoom(
     assert dataset["visualization"]["max_zoom"] == 19
 
 
+def test_add_dataset_allows_nested_dataset_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = {}
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    input_path = tmp_path / "source.geojson"
+    input_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        calls["kwargs"] = kwargs
+        dataset_dir = datasets_dir / "osm21" / "roads"
+        dataset_dir.mkdir(parents=True)
+        return None, None, None
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(cli.starlet, "get_config", lambda: {"mvt": {"zoom": 10}})
+    monkeypatch.setattr(cli.starlet, "list_datasets", lambda root: ["osm21/roads"])
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 1024,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            str(input_path),
+            "--name",
+            "osm21/roads",
+        ],
+    )
+
+    cli.main()
+
+    assert calls["kwargs"]["name"] == "osm21/roads"
+    assert (datasets_dir / "osm21").is_dir()
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("osm21/roads")
+    assert dataset["name"] == "osm21/roads"
+    assert dataset["dataset_state"] == "published"
+
+
 def test_add_dataset_saves_local_schema_doc_metadata(
     tmp_path: Path,
     monkeypatch,
@@ -647,8 +713,8 @@ def test_add_dataset_create_only_registers_esri_hub_repository(
     cli.main()
 
     datasets = cli.DatasetCatalog(db_path, datasets_dir).list({"state": "created"})
-    assert [dataset["name"] for dataset in datasets] == ["Address_Points"]
-    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("Address_Points")
+    assert [dataset["name"] for dataset in datasets] == ["egis-lacounty/Address_Points"]
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("egis-lacounty/Address_Points")
     assert dataset is not None
     assert calls["site_url"] == "https://egis-lacounty.hub.arcgis.com/search"
     assert calls["iter_kwargs"] == {"page_size": 100}
@@ -748,14 +814,14 @@ def test_add_datasets_create_only_registers_ezesri_catalog_layers(
 
     datasets = cli.DatasetCatalog(db_path, datasets_dir).list({"state": "created"})
     assert [dataset["name"] for dataset in datasets] == [
-        "German_State_Boundaries",
-        "Public_Safety_-_Districts",
-        "Public_Safety_-_Stations",
+        "ezesri/German_State_Boundaries",
+        "ezesri/Public_Safety_-_Districts",
+        "ezesri/Public_Safety_-_Stations",
     ]
     assert calls == {}
 
     catalog = cli.DatasetCatalog(db_path, datasets_dir)
-    states = catalog.get("German_State_Boundaries")
+    states = catalog.get("ezesri/German_State_Boundaries")
     assert states["description"] == "Federal state boundaries"
     assert states["source"]["type"] == "ezesri_directory"
     assert states["source"]["url"] == "https://services2.arcgis.com/example/arcgis/rest/services/Germany/FeatureServer/0"
@@ -838,7 +904,7 @@ def test_refresh_repository_adds_new_and_removes_missing_datasets(
 
     refreshed = cli.DatasetCatalog(db_path, datasets_dir)
     assert refreshed.get("Obsolete") is None
-    assert refreshed.get("German_State_Boundaries")["repository_id"] == repository["id"]
+    assert refreshed.get("ezesri/German_State_Boundaries")["repository_id"] == repository["id"]
     assert calls["deleted"] == "Obsolete"
 
 

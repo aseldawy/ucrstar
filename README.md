@@ -108,6 +108,14 @@ stores the concrete FeatureServer or MapServer layer URL, category, owner, tags,
 directory metadata, and a canonical ArcGIS item/service key. The ezesri Python
 package is not required for this directory import.
 
+Repository imports prefix each child dataset with the repository short name, for
+example `egis-lacounty/Address_Points` or `ezesri/German_State_Boundaries`.
+Those logical names are stored in matching subdirectories under `datasets/`.
+Manual names can use the same structure, such as `osm21/roads` and
+`osm21/parks`. Dataset names may contain `/` as a folder separator, but cannot
+contain empty path segments, `.` or `..`, backslashes, absolute paths, or control
+characters.
+
 By default, the command registers the dataset source, builds the dataset under
 `datasets/`, refreshes the SQLite catalog, enriches metadata when configured,
 and publishes the dataset so it is immediately available through the REST API.
@@ -412,17 +420,19 @@ If you later install the project in editable mode, the module form also works:
 - `POST /llm/chat.json` with a message, optional session ID, model ID, and map context
 - `GET /datasets.json?name=roads&geometry_type=Polygon&min_size=1000`
 - `GET /datasets.json?q=roads&semantic=1`
-- `GET /datasets/<ID>.json`
-- `GET /datasets/<ID>/style.json`
-- `GET /datasets/<ID>/histogram.png?size=256`
-- `GET /datasets/<ID>/download.geojson?MBR=x1,y1,x2,y2`
-- `GET /datasets/<ID>/download.csv?MBR=x1,y1,x2,y2`
-- `POST /datasets/<ID>/download.geojson` with a GeoJSON geometry body
-- `GET /datasets/<ID>/sample.json?MBR=x1,y1,x2,y2`
-- `GET /datasets/<ID>/sample.geojson?MBR=x1,y1,x2,y2`
-- `GET /datasets/<ID>/tiles/<z>/<x>/<y>.mvt`
+- `GET /datasets/<DATASET>.json`
+- `GET /datasets/<DATASET>/style.json`
+- `GET /datasets/<DATASET>/histogram.png?size=256`
+- `GET /datasets/<DATASET>/download.geojson?MBR=x1,y1,x2,y2`
+- `GET /datasets/<DATASET>/download.csv?MBR=x1,y1,x2,y2`
+- `POST /datasets/<DATASET>/download.geojson` with a GeoJSON geometry body
+- `GET /datasets/<DATASET>/sample.json?MBR=x1,y1,x2,y2`
+- `GET /datasets/<DATASET>/sample.geojson?MBR=x1,y1,x2,y2`
+- `GET /datasets/<DATASET>/tiles/<z>/<x>/<y>.mvt`
 
-`GET /datasets/<ID>.json` includes a discriminated `visualization` object. Small
+`<DATASET>` can be a dataset UUID or a dataset name. Slash-containing names such
+as `osm21/roads` are accepted in these URLs. `GET /datasets/<DATASET>.json`
+includes a discriminated `visualization` object. Small
 datasets smaller than 1 MB use `type: "GeoJSON"`; its `url` and
 `download_url` point to the complete GeoJSON export. Larger datasets with MVT
 output use `type: "VectorTile"` and include the tile URL template in both `url`

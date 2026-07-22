@@ -49,6 +49,42 @@ def test_catalog_sync_keeps_stable_id(tmp_path: Path, monkeypatch) -> None:
     assert catalog.get("roads")["repository_id"] == repositories[0]["id"]
 
 
+def test_catalog_sync_accepts_nested_dataset_names(tmp_path: Path, monkeypatch) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "osm21" / "roads").mkdir(parents=True)
+    db_path = tmp_path / "catalog.sqlite"
+    seen_paths = []
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["osm21/roads"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: seen_paths.append(Path(dataset))
+        or {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "description": "OSM roads",
+            "geometry": [{"geom_types": {"LineString": 4}, "total_points": 20}],
+            "attributes": [],
+        },
+    )
+
+    catalog = DatasetCatalog(db_path, datasets_dir)
+    synced = catalog.sync()[0]
+
+    assert synced["name"] == "osm21/roads"
+    assert catalog.get("osm21/roads")["description"] == "OSM roads"
+    assert seen_paths == [datasets_dir / "osm21" / "roads"]
+
+
 def test_catalog_sync_merges_metadata_without_deleting_existing_keys(
     tmp_path: Path, monkeypatch
 ) -> None:

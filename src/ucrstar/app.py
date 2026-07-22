@@ -32,7 +32,7 @@ from .assistant_tools import (
     ViewportSummarizer,
 )
 from .assistant_style import client_safe_style
-from .catalog import DatasetCatalog
+from .catalog import DatasetCatalog, dataset_relative_path
 from .chat import (
     ChatModelNotAvailable,
     ChatService,
@@ -82,6 +82,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         Path(app.config["DATABASE"]),
         Path(app.config["DATASETS_DIR"]),
     )
+    app.extensions["ucrstar_catalog"].sync()
     app.extensions["ucrstar_llm_registry"] = LLMRegistry(
         app.config["UCRSTAR2_CONFIG"],
         client_override=app.config.get("LLM_CLIENT"),
@@ -190,7 +191,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/datasets.json")
     def datasets() -> Response:
-        catalog().sync()
         filters = {
             key: value
             for key, value in request.args.items()
@@ -227,7 +227,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/repositories.json")
     def repositories() -> Response:
-        catalog().sync()
         return jsonify(
             {
                 "repositories": [
@@ -239,7 +238,6 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/repositories/<repository_ref>/datasets.json")
     def repository_datasets(repository_ref: str) -> Response:
-        catalog().sync()
         repository = catalog().get_repository(repository_ref)
         if repository is None:
             return jsonify({"error": "repository not found"}), 404
@@ -266,14 +264,14 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             }
         )
 
-    @app.get("/datasets/<dataset_ref>.json")
+    @app.get("/datasets/<path:dataset_ref>.json")
     def dataset_details(dataset_ref: str) -> Response:
         dataset = catalog().get(dataset_ref)
         if dataset is None:
             return jsonify({"error": "dataset not found"}), 404
         return jsonify(redact_source(dataset))
 
-    @app.get("/datasets/<dataset_ref>/style.json")
+    @app.get("/datasets/<path:dataset_ref>/style.json")
     def dataset_style(dataset_ref: str) -> Response:
         dataset = catalog().get(dataset_ref)
         if dataset is None:
@@ -282,10 +280,10 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         assert style is not None
         return jsonify(client_safe_style(style, dataset))
 
-    @app.get("/datasets/<dataset_ref>/histogram.png")
+    @app.get("/datasets/<path:dataset_ref>/histogram.png")
     def dataset_histogram(dataset_ref: str) -> Response:
         dataset = require_dataset(dataset_ref)
-        if isinstance(dataset, Response):
+        if not isinstance(dataset, dict):
             return dataset
 
         size = int(request.args.get("size", "256"))
@@ -303,10 +301,10 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             headers={"Cache-Control": "public, max-age=300"},
         )
 
-    @app.route("/datasets/<dataset_ref>/download.<fmt>", methods=["GET", "POST"])
+    @app.route("/datasets/<path:dataset_ref>/download.<fmt>", methods=["GET", "POST"])
     def download(dataset_ref: str, fmt: str) -> Response:
         dataset = require_dataset(dataset_ref)
-        if isinstance(dataset, Response):
+        if not isinstance(dataset, dict):
             return dataset
         geometry = request_geometry()
         dataset_dir = dataset_path(dataset["name"])
@@ -315,13 +313,13 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             return Response(
                 stream_with_context(iter_geojson(dataset_dir, geometry)),
                 mimetype="application/geo+json",
-                headers={"Content-Disposition": f"attachment; filename={dataset['name']}.geojson"},
+                headers={"Content-Disposition": f"attachment; filename={download_filename(dataset['name'], 'geojson')}"},
             )
         if fmt == "csv":
             return Response(
                 stream_with_context(iter_csv(dataset_dir, geometry)),
                 mimetype="text/csv",
-                headers={"Content-Disposition": f"attachment; filename={dataset['name']}.csv"},
+                headers={"Content-Disposition": f"attachment; filename={download_filename(dataset['name'], 'csv')}"},
             )
         if fmt in {"parquet", "zip"}:
             return jsonify(
@@ -336,10 +334,10 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             ), 501
         return jsonify({"error": f"unsupported format: {fmt}"}), 400
 
-    @app.get("/datasets/<dataset_ref>/sample.<fmt>")
+    @app.get("/datasets/<path:dataset_ref>/sample.<fmt>")
     def sample(dataset_ref: str, fmt: str) -> Response:
         dataset = require_dataset(dataset_ref)
-        if isinstance(dataset, Response):
+        if not isinstance(dataset, dict):
             return dataset
         geometry = request_geometry()
         if geometry is None:
@@ -354,10 +352,10 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             return jsonify(to_feature(record))
         return jsonify({"error": f"unsupported sample format: {fmt}"}), 400
 
-    @app.get("/datasets/<dataset_ref>/tiles/<int:z>/<int:x>/<int:y>.mvt")
+    @app.get("/datasets/<path:dataset_ref>/tiles/<int:z>/<int:x>/<int:y>.mvt")
     def tile(dataset_ref: str, z: int, x: int, y: int) -> Response:
         dataset = require_dataset(dataset_ref)
-        if isinstance(dataset, Response):
+        if not isinstance(dataset, dict):
             return dataset
         attributes_arg = request.args.get("attributes")
         attributes = (
@@ -408,10 +406,15 @@ def chat_service() -> ChatService:
 
 
 def dataset_path(name: str) -> Path:
-    return Path(current_app.config["DATASETS_DIR"]) / name
+    return Path(current_app.config["DATASETS_DIR"]) / dataset_relative_path(name)
 
 
-def require_dataset(dataset_ref: str) -> dict[str, Any] | Response:
+def download_filename(name: str, extension: str) -> str:
+    safe_name = name.replace("/", "_").replace("\\", "_")
+    return f"{safe_name}.{extension}"
+
+
+def require_dataset(dataset_ref: str) -> dict[str, Any] | tuple[Response, int]:
     dataset = catalog().get(dataset_ref)
     if dataset is None:
         return jsonify({"error": "dataset not found"}), 404

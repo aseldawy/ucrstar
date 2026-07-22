@@ -56,6 +56,24 @@ CATEGORICAL_COLORS = [
 ]
 
 
+def dataset_relative_path(name: str) -> Path:
+    """Return a safe relative path for a logical dataset name."""
+    validate_dataset_name(name)
+    return Path(*name.split("/"))
+
+
+def validate_dataset_name(name: str) -> None:
+    if not isinstance(name, str) or not name:
+        raise ValueError("dataset name is required")
+    if name.startswith("/") or "\\" in name:
+        raise ValueError(f"invalid dataset name: {name}")
+    parts = name.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError(f"invalid dataset name: {name}")
+    if any(any(ord(char) < 32 for char in part) for part in parts):
+        raise ValueError(f"invalid dataset name: {name}")
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS datasets (
     id TEXT PRIMARY KEY,
@@ -180,6 +198,7 @@ class DatasetCatalog:
                 for row in conn.execute("SELECT id, repository_id, name FROM datasets")
             }
             for name in names:
+                validate_dataset_name(name)
                 existing = known.get(name)
                 dataset_id = existing[0] if existing else str(uuid.uuid4())
                 LOGGER.info("Reading Starlet metadata for dataset '%s'", name)
@@ -466,6 +485,7 @@ class DatasetCatalog:
         if repository_id is None:
             repository_id = self.default_repository()["id"]
         existing = self.get(name)
+        validate_dataset_name(name)
         if existing is not None and not overwrite:
             raise ValueError(f"Dataset already exists: {name}")
 
@@ -733,7 +753,7 @@ class DatasetCatalog:
 
     def _build_row(self, dataset_id: str, name: str) -> dict[str, Any]:
         """Build a catalog row from Starlet metadata and summary files."""
-        dataset_dir = self.datasets_dir / name
+        dataset_dir = self.datasets_dir / dataset_relative_path(name)
         metadata = starlet.get_dataset_metadata(dataset_dir)
         summary = starlet.get_dataset_summary(dataset_dir) or {}
         geometry_entries = summary.get("geometry") or []

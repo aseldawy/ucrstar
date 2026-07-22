@@ -15,7 +15,7 @@ from typing import Any
 import starlet
 
 from .assistant_style import build_assistant_style, style_attributes
-from .catalog import DatasetCatalog
+from .catalog import DatasetCatalog, dataset_relative_path
 from .llm import ssl_context
 
 
@@ -179,7 +179,7 @@ class ViewportSummarizer:
         if not valid_bounds(bounds):
             raise ValueError("The current viewport bounds are invalid")
 
-        dataset_dir = Path(self.catalog.datasets_dir) / dataset["name"]
+        dataset_dir = Path(self.catalog.datasets_dir) / dataset_relative_path(dataset["name"])
         batches = starlet.query_dataset(
             dataset_dir,
             tuple(bounds),

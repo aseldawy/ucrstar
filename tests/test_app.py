@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from ucrstar.app import create_app
+from ucrstar.catalog import DatasetCatalog
 
 
 def test_datasets_endpoint_uses_catalog(tmp_path: Path, monkeypatch) -> None:
@@ -39,15 +40,59 @@ def test_datasets_endpoint_uses_catalog(tmp_path: Path, monkeypatch) -> None:
         }
     )
 
-    assert not db_path.exists()
+    assert db_path.exists()
     response = app.test_client().get("/datasets.json?geometry_type=Polygon")
 
     assert response.status_code == 200
-    assert db_path.exists()
     body = response.get_json()
     assert body["datasets"][0]["name"] == "counties"
     assert body["datasets"][0]["geometry_types"] == ["Polygon"]
     assert body["datasets"][0]["dataset_state"] == "published"
+
+
+def test_requests_do_not_sync_catalog(tmp_path: Path, monkeypatch) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "counties").mkdir(parents=True)
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["counties"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "name": "counties",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 100,
+            "bbox": [-1, -2, 3, 4],
+            "has_mvt": False,
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "description": "County boundaries",
+            "geometry": [{"geom_types": {"Polygon": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+        }
+    )
+
+    def fail_sync(self):
+        raise AssertionError("catalog.sync should only run during app startup")
+
+    monkeypatch.setattr(DatasetCatalog, "sync", fail_sync)
+    client = app.test_client()
+    dataset = client.get("/datasets.json").get_json()["datasets"][0]
+
+    assert dataset["name"] == "counties"
+    assert client.get(f"/datasets/{dataset['id']}.json").status_code == 200
+    assert client.get(f"/datasets/{dataset['id']}/style.json").status_code == 200
 
 
 def test_datasets_endpoint_defaults_to_published_state(tmp_path: Path) -> None:
@@ -191,6 +236,60 @@ def test_dataset_tiles_endpoint_uses_nested_dataset_url(
     assert response.data == b"tile"
     assert response.mimetype == "application/vnd.mapbox-vector-tile"
     assert tile_calls == [(datasets_dir / "counties", 1, 2, 3, None)]
+
+
+def test_dataset_routes_accept_nested_dataset_names(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "osm21" / "roads").mkdir(parents=True)
+    tile_calls = []
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["osm21/roads"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10 * 1024 * 1024,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "description": "OSM roads",
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+
+    def fake_get_tile(dataset, z, x, y, attributes=None):
+        tile_calls.append((dataset, z, x, y, attributes))
+        return b"tile"
+
+    monkeypatch.setattr("starlet.get_tile", fake_get_tile)
+
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+        }
+    )
+    client = app.test_client()
+
+    detail = client.get("/datasets/osm21/roads.json")
+    tile = client.get("/datasets/osm21/roads/tiles/1/2/3.mvt")
+
+    assert detail.status_code == 200
+    assert detail.get_json()["name"] == "osm21/roads"
+    assert tile.status_code == 200
+    assert tile.data == b"tile"
+    assert tile_calls == [(datasets_dir / "osm21" / "roads", 1, 2, 3, None)]
 
 
 def test_dataset_tiles_endpoint_forwards_requested_attributes(
