@@ -27,6 +27,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "max_history_messages": 20,
             "max_context_chars": 40000,
             "max_style_chars": 40000,
+            "max_tool_calls": 5,
+            "tool_search_limit": 10,
+            "semantic_max_distance": 0.8,
+            "viewport_max_features": 5000,
+            "viewport_sample_size": 5,
+            "viewport_max_attributes": 20,
+            "viewport_top_values": 5,
+        },
+        "geocoding": {
+            "base_url": "https://nominatim.openstreetmap.org/search",
+            "user_agent": "ucrstar/0.1 (geospatial dataset assistant)",
+            "timeout_seconds": 10,
         },
         "providers": {
             "openai": {

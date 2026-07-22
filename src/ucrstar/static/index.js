@@ -1881,7 +1881,7 @@ function escapeHtml(value){
       if (!data || !data.message) throw new Error('The server returned an invalid chat response');
       saveSession(data.session_id);
       addMsg('bot', data.message.content || '');
-      handleActions(data.actions || []);
+      await handleActions(data.actions || []);
     } catch(e) {
       addMsg('err', 'Chat error: '+e.message);
     } finally {
@@ -1890,9 +1890,11 @@ function escapeHtml(value){
     }
   }
 
-  function handleActions(actions){
-    actions.forEach(function(action){
-      if (!action || !action.type) return;
+  async function handleActions(actions){
+    var applied = [];
+    for (var i=0; i<actions.length; i++) {
+      var action = actions[i];
+      if (!action || !action.type) continue;
       if (action.type === 'show_datasets' && Array.isArray(action.datasets)) {
         lastSearchQuery = action.query || '';
         lastSearchResults = action.datasets;
@@ -1902,11 +1904,31 @@ function escapeHtml(value){
         renderSearchResults(lastSearchResults);
         showPanel();
         updateSearchControls();
+        if (action.query) updateUrl({history:'push', search:action.query});
+        applied.push('Showing '+action.datasets.length+' dataset'+(action.datasets.length === 1 ? '' : 's'));
+      } else if (action.type === 'select_dataset' && typeof action.dataset_id === 'string' && action.dataset_id) {
+        await selectDataset(action.dataset_id);
+        applied.push('Dataset selected');
+      } else if (action.type === 'fit_bounds' && validActionBounds(action.bounds)) {
+        await waitForMapLoad();
+        map.fitBounds(
+          [[action.bounds[0], action.bounds[1]], [action.bounds[2], action.bounds[3]]],
+          {padding:70, maxZoom:12, duration:600}
+        );
+        applied.push(action.label ? 'Map moved to '+action.label : 'Map view updated');
       } else if (action.type === 'change_basemap' && ['street','satellite'].indexOf(action.basemap) !== -1) {
         basemapMode = action.basemap;
         updateBasemapMode();
+        applied.push((action.basemap === 'satellite' ? 'Satellite' : 'Street')+' basemap selected');
       }
-    });
+    }
+    if (applied.length) addMsg('info', applied.join(' · '));
+  }
+
+  function validActionBounds(bounds){
+    return Array.isArray(bounds)
+      && bounds.length === 4
+      && bounds.every(function(value){ return typeof value === 'number' && Number.isFinite(value); });
   }
 
   function resetChat(){

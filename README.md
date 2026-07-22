@@ -304,11 +304,26 @@ browser saves it automatically; Reset discards it, so the next message starts
 a new server-side session. Sessions and individual user/assistant messages are
 stored in `chat_sessions` and `chat_messages` in the catalog SQLite database.
 
-The response also contains an `actions` array. It is empty in the first chat
-implementation phase; its typed contract is reserved for validated dataset,
-style, navigation, basemap, and download actions. The integrated `builtin`
-backend remains available for offline enrichment and deterministic embeddings,
-but it does not provide conversational chat.
+The assistant uses server-side tools to ground requests in catalog and map data.
+Dataset discovery combines text and embedding search. Ambiguous matches return a
+`show_datasets` action that populates the normal search-results panel; a confident
+match returns `select_dataset`. Named regions are resolved by the server-side
+geocoder before a validated `fit_bounds` action is returned. The assistant can also
+return `change_basemap` for the street and satellite basemaps.
+
+For questions about the visible map, the browser sends viewport bounds rather than
+feature summaries. The server runs a bounded Starlet range query over the selected
+dataset and supplies aggregate statistics and a small record sample to the LLM.
+The limits are configured under `llm.chat` with `viewport_max_features`,
+`viewport_sample_size`, `viewport_max_attributes`, and `viewport_top_values`.
+Geocoding endpoint, user agent, and timeout are configured under `llm.geocoding`.
+
+All tool calls, results, and validated actions are stored with the assistant message
+in `chat_messages.tool_calls_json` and `chat_messages.actions_json`, so later turns
+can refer to real search results without trusting invented IDs from the model. Style
+generation/editing and chat-initiated downloads remain unavailable in this phase.
+The integrated `builtin` backend remains available for offline enrichment and
+deterministic embeddings, but it does not provide conversational chat.
 
 If you later install the project in editable mode, the module form also works:
 

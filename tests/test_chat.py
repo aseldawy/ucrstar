@@ -73,15 +73,14 @@ def test_capabilities_disable_chat_when_llm_is_disabled(tmp_path: Path) -> None:
             "chat": False,
             "server_history": False,
             "semantic_search": False,
+            "viewport_summary": False,
             "style_generation": False,
         },
         "action_types": [
             "show_datasets",
             "select_dataset",
-            "apply_style",
             "fit_bounds",
             "change_basemap",
-            "prepare_download",
         ],
     }
 

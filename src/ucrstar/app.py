@@ -25,6 +25,7 @@ from flask import (
 )
 from werkzeug.serving import WSGIRequestHandler
 
+from .assistant_tools import AssistantTools, NominatimGeocoder, ViewportSummarizer
 from .catalog import DatasetCatalog
 from .chat import (
     ChatModelNotAvailable,
@@ -79,10 +80,38 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         app.config["UCRSTAR2_CONFIG"],
         client_override=app.config.get("LLM_CLIENT"),
     )
+    llm_config = app.config["UCRSTAR2_CONFIG"].get("llm") or {}
+    chat_config = llm_config.get("chat") or {}
+    geocoding_config = llm_config.get("geocoding") or {}
+    geocoder = app.config.get("GEOCODER") or NominatimGeocoder(
+        base_url=str(
+            geocoding_config.get("base_url")
+            or "https://nominatim.openstreetmap.org/search"
+        ),
+        user_agent=str(
+            geocoding_config.get("user_agent")
+            or "ucrstar/0.1 (geospatial dataset assistant)"
+        ),
+        timeout=float(geocoding_config.get("timeout_seconds", 10)),
+    )
+    app.extensions["ucrstar_assistant_tools"] = AssistantTools(
+        app.extensions["ucrstar_catalog"],
+        geocoder,
+        ViewportSummarizer(
+            app.extensions["ucrstar_catalog"],
+            max_features=int(chat_config.get("viewport_max_features", 5_000)),
+            sample_size=int(chat_config.get("viewport_sample_size", 5)),
+            max_attributes=int(chat_config.get("viewport_max_attributes", 20)),
+            top_values=int(chat_config.get("viewport_top_values", 5)),
+        ),
+        search_limit=int(chat_config.get("tool_search_limit", 10)),
+        semantic_max_distance=float(chat_config.get("semantic_max_distance", 0.8)),
+    )
     app.extensions["ucrstar_chat"] = ChatService(
         ChatStore(Path(app.config["DATABASE"])),
         app.extensions["ucrstar_catalog"],
         app.extensions["ucrstar_llm_registry"],
+        app.extensions["ucrstar_assistant_tools"],
         app.config["UCRSTAR2_CONFIG"],
     )
 
