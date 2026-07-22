@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import math
 import struct
 import zlib
@@ -25,11 +26,18 @@ from flask import (
 from werkzeug.serving import WSGIRequestHandler
 
 from .catalog import DatasetCatalog
+from .chat import (
+    ChatModelNotAvailable,
+    ChatService,
+    ChatSessionNotFound,
+    ChatStore,
+    LLMRegistry,
+)
 from .config import load_config
-from .llm import llm_from_config
 
 
 DEFAULT_BATCH_SIZE = 1000
+LOGGER = logging.getLogger(__name__)
 
 
 class TimingWSGIRequestHandler(WSGIRequestHandler):
@@ -67,6 +75,16 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         Path(app.config["DATABASE"]),
         Path(app.config["DATASETS_DIR"]),
     )
+    app.extensions["ucrstar_llm_registry"] = LLMRegistry(
+        app.config["UCRSTAR2_CONFIG"],
+        client_override=app.config.get("LLM_CLIENT"),
+    )
+    app.extensions["ucrstar_chat"] = ChatService(
+        ChatStore(Path(app.config["DATABASE"])),
+        app.extensions["ucrstar_catalog"],
+        app.extensions["ucrstar_llm_registry"],
+        app.config["UCRSTAR2_CONFIG"],
+    )
 
     @app.get("/")
     def index() -> Response:
@@ -81,6 +99,41 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
     @app.get("/health.json")
     def health() -> Response:
         return jsonify({"status": "ok"})
+
+    @app.get("/llm/capabilities.json")
+    def llm_capabilities() -> Response:
+        return jsonify(llm_registry().capabilities())
+
+    @app.post("/llm/chat.json")
+    def llm_chat() -> tuple[Response, int] | Response:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "request body must be a JSON object"}), 400
+        capabilities = llm_registry().capabilities()
+        if not capabilities["available"]:
+            return jsonify(
+                {
+                    "error": "LLM chat is unavailable",
+                    "reason": capabilities["reason"],
+                }
+            ), 503
+        try:
+            result = chat_service().respond(
+                payload.get("message"),
+                session_id=payload.get("session_id"),
+                model_id=payload.get("model_id"),
+                context=payload.get("context"),
+            )
+        except ChatSessionNotFound as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ChatModelNotAvailable as exc:
+            return jsonify({"error": str(exc)}), 400
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception:
+            LOGGER.exception("LLM chat request failed")
+            return jsonify({"error": "The LLM provider could not complete the request"}), 502
+        return jsonify(result)
 
     @app.get("/datasets.json")
     def datasets() -> Response:
@@ -288,7 +341,15 @@ def catalog() -> DatasetCatalog:
 
 
 def llm_client() -> Any:
-    return llm_from_config(current_app.config["UCRSTAR2_CONFIG"])
+    return llm_registry().client()
+
+
+def llm_registry() -> LLMRegistry:
+    return current_app.extensions["ucrstar_llm_registry"]
+
+
+def chat_service() -> ChatService:
+    return current_app.extensions["ucrstar_chat"]
 
 
 def dataset_path(name: str) -> Path:

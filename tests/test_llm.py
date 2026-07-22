@@ -1,7 +1,15 @@
 from pathlib import Path
 
 from ucrstar import llm as llm_module
-from ucrstar.llm import GeminiClient, LLMConfig, llm_from_config, resolve_integrated_model, ssl_context
+from ucrstar.llm import (
+    GeminiClient,
+    LLMConfig,
+    OllamaClient,
+    OpenAIClient,
+    llm_from_config,
+    resolve_integrated_model,
+    ssl_context,
+)
 
 
 def test_integrated_builtin_enriches_without_external_server() -> None:
@@ -189,3 +197,101 @@ def test_gemini_embedding_uses_current_model_and_header(monkeypatch) -> None:
     assert calls["url"].endswith("/models/gemini-embedding-2:embedContent")
     assert calls["headers"]["x-goog-api-key"] == "secret"
     assert "title: dataset catalog entry | text:" in calls["body"]["content"]["parts"][0]["text"]
+
+
+def test_openai_chat_sends_normalized_history(monkeypatch) -> None:
+    client = OpenAIClient(
+        LLMConfig(
+            enabled=True,
+            provider="openai",
+            max_description_chars=250,
+            semantic_search=True,
+            search_limit=20,
+            fallback_on_error=True,
+            provider_config={"chat_model": "test-chat", "embedding_model": "test-embed"},
+        )
+    )
+    calls = {}
+
+    def fake_post(path, body):
+        calls["path"] = path
+        calls["body"] = body
+        return {"choices": [{"message": {"content": "  Hello from OpenAI  "}}]}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    messages = [
+        {"role": "system", "content": "Be helpful"},
+        {"role": "user", "content": "Hello"},
+    ]
+
+    response = client.chat(messages)
+
+    assert response == "Hello from OpenAI"
+    assert calls["path"] == "/chat/completions"
+    assert calls["body"]["messages"] == messages
+
+
+def test_gemini_chat_maps_assistant_role_and_system_instruction(monkeypatch) -> None:
+    client = GeminiClient(
+        LLMConfig(
+            enabled=True,
+            provider="gemini",
+            max_description_chars=250,
+            semantic_search=True,
+            search_limit=20,
+            fallback_on_error=True,
+            provider_config={"chat_model": "test-chat", "embedding_model": "test-embed"},
+        )
+    )
+    calls = {}
+
+    def fake_post(path, body):
+        calls["path"] = path
+        calls["body"] = body
+        return {"candidates": [{"content": {"parts": [{"text": "Gemini response"}]}}]}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    response = client.chat(
+        [
+            {"role": "system", "content": "Be helpful"},
+            {"role": "user", "content": "First"},
+            {"role": "assistant", "content": "Earlier response"},
+            {"role": "user", "content": "Second"},
+        ]
+    )
+
+    assert response == "Gemini response"
+    assert calls["path"] == "/models/test-chat:generateContent"
+    assert calls["body"]["systemInstruction"] == {"parts": [{"text": "Be helpful"}]}
+    assert [item["role"] for item in calls["body"]["contents"]] == ["user", "model", "user"]
+
+
+def test_ollama_chat_uses_server_configured_model(monkeypatch) -> None:
+    client = OllamaClient(
+        LLMConfig(
+            enabled=True,
+            provider="ollama",
+            max_description_chars=250,
+            semantic_search=True,
+            search_limit=20,
+            fallback_on_error=True,
+            provider_config={"chat_model": "test-chat", "embedding_model": "test-embed"},
+        )
+    )
+    calls = {}
+
+    def fake_post(path, body):
+        calls["path"] = path
+        calls["body"] = body
+        return {"message": {"content": "Ollama response"}}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    messages = [{"role": "user", "content": "Hello"}]
+
+    response = client.chat(messages)
+
+    assert response == "Ollama response"
+    assert calls["path"] == "/api/chat"
+    assert calls["body"]["model"] == "test-chat"
+    assert calls["body"]["messages"] == messages

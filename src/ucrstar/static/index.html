@@ -133,53 +133,40 @@
     </div><!-- #map -->
   </div><!-- .app -->
 
-  <!-- ── OLLAMA AI ASSISTANT ────────────────────────────────────────────── -->
-  <button class="ai-fab" id="aiFab" title="AI Style Assistant (Ollama)">&#129302;</button>
+  <!-- ── AI ASSISTANT ───────────────────────────────────────────────────── -->
+  <button class="ai-fab" id="aiFab" title="AI Assistant" disabled>&#129302;</button>
 
   <div class="ai-panel" id="aiPanel">
     <div class="ai-head">
       <div>
-        <div class="ai-head-title">&#129302; AI Style Assistant</div>
-        <div class="ai-head-sub">Ollama &middot; 100% local &middot; free</div>
+        <div class="ai-head-title">&#129302; AI Assistant</div>
+        <div class="ai-head-sub" id="aiHeadSub">Checking server configuration</div>
       </div>
       <span class="ai-head-x" onclick="aiToggle()">&#215;</span>
     </div>
     <div class="ai-model-bar">
-      <span class="ai-model-label">Modelo</span>
-      <select class="ai-model-select" id="aiModelSelect">
-        <option value="llama3.2">llama3.2</option>
-        <option value="llama3.1">llama3.1</option>
-        <option value="llama3">llama3</option>
-        <option value="mistral">mistral</option>
-        <option value="gemma2">gemma2</option>
-        <option value="qwen2.5">qwen2.5</option>
-        <option value="phi3">phi3</option>
-        <option value="deepseek-r1">deepseek-r1</option>
-      </select>
-      <div class="ai-status-dot" id="aiStatusDot" title="Ollama status"></div>
+      <span class="ai-model-label">Model</span>
+      <select class="ai-model-select" id="aiModelSelect" disabled></select>
+      <button class="ai-reset-btn" id="aiResetBtn" type="button" title="Start a new chat" disabled>Reset</button>
+      <div class="ai-status-dot" id="aiStatusDot" title="Checking LLM status"></div>
     </div>
     <div class="ai-chips">
-      <button class="ai-chip" onclick="aiQuick('describe')">&#128269; Describe</button>
-      <button class="ai-chip" onclick="aiQuick('suggest')">&#128161; Suggest style</button>
-      <button class="ai-chip" onclick="aiQuick('best')">&#128506; Best attribute</button>
-      <button class="ai-chip" onclick="aiQuick('insight')">&#128202; Insights</button>
-      <button class="ai-chip" onclick="aiQuick('anomaly')">&#9888; Anomalies</button>
+      <button class="ai-chip" onclick="aiQuick('describe')" disabled>&#128269; Describe</button>
+      <button class="ai-chip" onclick="aiQuick('suggest')" disabled>&#128161; Suggest style</button>
+      <button class="ai-chip" onclick="aiQuick('best')" disabled>&#128506; Best attribute</button>
+      <button class="ai-chip" onclick="aiQuick('insight')" disabled>&#128202; Insights</button>
+      <button class="ai-chip" onclick="aiQuick('anomaly')" disabled>&#9888; Anomalies</button>
     </div>
     <div class="ai-msgs" id="aiMsgs">
       <div class="ai-msg info">
-        Make sure <strong>Ollama</strong> is running:<br>
-        <code>OLLAMA_ORIGINS="*" ollama serve</code><br>
-        Then select a dataset and ask me anything.
+        Checking whether the server supports chat...
       </div>
     </div>
-    <button class="ai-apply-btn" id="aiApplyBtn" onclick="aiApplyStyle()">
-      &#9889; Apply suggested style
-    </button>
     <div class="ai-input-row">
       <input class="ai-in" type="text" id="aiIn"
         placeholder="e.g. color counties by land area using blues..."
-        autocomplete="off">
-      <button class="ai-send-btn" id="aiSendBtn" onclick="aiSend()">&#9654;</button>
+        autocomplete="off" disabled>
+      <button class="ai-send-btn" id="aiSendBtn" onclick="aiSend()" disabled>&#9654;</button>
     </div>
   </div>
 

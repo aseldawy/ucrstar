@@ -137,11 +137,22 @@ class LLMClient:
     def embed(self, text: str) -> list[float]:
         return deterministic_embedding(text)
 
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        """Return an assistant response for a normalized chat message list."""
+        raise NotImplementedError
+
     def complete_json(self, prompt: str) -> dict[str, Any]:
         raise NotImplementedError
 
 
 class NullLLM(LLMClient):
+    @property
+    def enabled(self) -> bool:
+        return False
+
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        raise RuntimeError("LLM support is not available")
+
     def complete_json(self, prompt: str) -> dict[str, Any]:
         return {}
 
@@ -173,12 +184,38 @@ class IntegratedClient(LLMClient):
             LOGGER.info("Falling back to built-in integrated enrichment")
         return builtin_enrichment(prompt, self.settings.max_description_chars)
 
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        if self._llama is None:
+            if self._llama_load_error is not None:
+                raise RuntimeError("The integrated chat model could not be loaded") from self._llama_load_error
+            raise RuntimeError("The configured integrated backend does not support chat")
+        LOGGER.info("Generating chat response with integrated llama-cpp model")
+        response = self._llama.create_chat_completion(
+            messages=messages,
+            max_tokens=int(self.settings.provider_config.get("chat_max_tokens", 1000)),
+            temperature=float(self.settings.provider_config.get("temperature", 0.2)),
+        )
+        content = response["choices"][0]["message"]["content"]
+        return str(content or "").strip()
+
     def embed(self, text: str) -> list[float]:
         dimensions = int(self.settings.provider_config.get("embedding_dimensions", 128))
         return deterministic_embedding(text, dimensions=dimensions)
 
 
 class OpenAIClient(LLMClient):
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        LOGGER.info("Calling OpenAI chat model %s", self.chat_model)
+        data = self._post(
+            "/chat/completions",
+            {
+                "model": self.chat_model,
+                "messages": messages,
+                "temperature": float(self.settings.provider_config.get("temperature", 0.2)),
+            },
+        )
+        return str(data["choices"][0]["message"]["content"] or "").strip()
+
     def complete_json(self, prompt: str) -> dict[str, Any]:
         LOGGER.info("Calling OpenAI chat model %s", self.chat_model)
         body = {
@@ -208,6 +245,27 @@ class OpenAIClient(LLMClient):
 
 
 class GeminiClient(LLMClient):
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        LOGGER.info("Calling Gemini chat model %s", self.chat_model)
+        system_parts = [
+            {"text": message["content"]}
+            for message in messages
+            if message.get("role") == "system"
+        ]
+        contents = [
+            {
+                "role": "model" if message.get("role") == "assistant" else "user",
+                "parts": [{"text": message["content"]}],
+            }
+            for message in messages
+            if message.get("role") in {"user", "assistant"}
+        ]
+        body: dict[str, Any] = {"contents": contents}
+        if system_parts:
+            body["systemInstruction"] = {"parts": system_parts}
+        data = self._post(f"/models/{self.chat_model}:generateContent", body)
+        return str(data["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
+
     def complete_json(self, prompt: str) -> dict[str, Any]:
         LOGGER.info("Calling Gemini chat model %s", self.chat_model)
         model = self.chat_model
@@ -249,6 +307,21 @@ class GeminiClient(LLMClient):
 
 
 class OllamaClient(LLMClient):
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        LOGGER.info("Calling Ollama chat model %s", self.chat_model)
+        data = self._post(
+            "/api/chat",
+            {
+                "model": self.chat_model,
+                "stream": False,
+                "messages": messages,
+                "options": {
+                    "temperature": float(self.settings.provider_config.get("temperature", 0.2))
+                },
+            },
+        )
+        return str(data["message"]["content"] or "").strip()
+
     def complete_json(self, prompt: str) -> dict[str, Any]:
         LOGGER.info("Calling Ollama chat model %s", self.chat_model)
         data = self._post(

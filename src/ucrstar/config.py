@@ -22,6 +22,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "semantic_search": True,
         "search_limit": 20,
         "fallback_on_error": True,
+        "chat": {
+            "max_message_chars": 8000,
+            "max_history_messages": 20,
+            "max_context_chars": 40000,
+            "max_style_chars": 40000,
+        },
         "providers": {
             "openai": {
                 "api_key": "${OPENAI_API_KEY}",

@@ -1702,9 +1702,11 @@ function escapeHtml(value){
 }
 
 (function(){
-  var OLLAMA = 'http://localhost:11434';
-  var _hist = [];
-  var _pending = null;
+  var SESSION_STORAGE_KEY = 'ucrstar-ai-session-id';
+  var _available = false;
+  var _busy = false;
+  var _sessionId = loadSavedSession();
+
   function addMsg(type, content){
     var box = document.getElementById('aiMsgs');
     if (!box) return null;
@@ -1720,106 +1722,205 @@ function escapeHtml(value){
     box.scrollTop = box.scrollHeight;
     return el;
   }
-  function ping(){
-    fetch(OLLAMA+'/api/tags').then(function(r){
-      var dot = document.getElementById('aiStatusDot');
-      if (!dot) return;
-      dot.className = r.ok ? 'ai-status-dot ok' : 'ai-status-dot err';
-      dot.title = r.ok ? 'Ollama is running' : 'Ollama not responding';
-    }).catch(function(){
-      var dot = document.getElementById('aiStatusDot');
-      if (dot) { dot.className = 'ai-status-dot err'; dot.title = 'Ollama not found at localhost:11434'; }
+
+  function replaceMessages(type, content){
+    var box = document.getElementById('aiMsgs');
+    if (box) box.innerHTML = '';
+    addMsg(type, content);
+  }
+
+  function loadSavedSession(){
+    try { return localStorage.getItem(SESSION_STORAGE_KEY); } catch(e) { return null; }
+  }
+
+  function saveSession(sessionId){
+    _sessionId = sessionId || null;
+    try {
+      if (_sessionId) localStorage.setItem(SESSION_STORAGE_KEY, _sessionId);
+      else localStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch(e) {}
+  }
+
+  function setAvailable(available, reason){
+    _available = Boolean(available);
+    var fab = document.getElementById('aiFab');
+    var input = document.getElementById('aiIn');
+    var send = document.getElementById('aiSendBtn');
+    var reset = document.getElementById('aiResetBtn');
+    var dot = document.getElementById('aiStatusDot');
+    if (fab) {
+      fab.disabled = !_available;
+      fab.title = _available ? 'AI Assistant' : (reason || 'AI Assistant is unavailable');
+    }
+    if (input) input.disabled = !_available;
+    if (send) send.disabled = !_available;
+    if (reset) reset.disabled = !_available;
+    document.querySelectorAll('.ai-chip').forEach(function(chip){ chip.disabled = !_available; });
+    if (dot) {
+      dot.className = 'ai-status-dot ' + (_available ? 'ok' : 'err');
+      dot.title = _available ? 'Server LLM is configured' : (reason || 'Server LLM is unavailable');
+    }
+  }
+
+  function setBusy(busy){
+    _busy = busy;
+    var input = document.getElementById('aiIn');
+    var send = document.getElementById('aiSendBtn');
+    if (input) input.disabled = busy || !_available;
+    if (send) send.disabled = busy || !_available;
+    document.querySelectorAll('.ai-chip').forEach(function(chip){ chip.disabled = busy || !_available; });
+  }
+
+  function populateModels(capabilities){
+    var select = document.getElementById('aiModelSelect');
+    if (!select) return;
+    select.innerHTML = '';
+    (capabilities.models || []).forEach(function(model){
+      var option = document.createElement('option');
+      option.value = model.id;
+      option.textContent = model.label + (model.provider ? ' · ' + model.provider : '');
+      select.appendChild(option);
     });
+    if (capabilities.default_model) select.value = capabilities.default_model;
+    select.disabled = !_available || select.options.length <= 1;
   }
-  function getCtx(){
-    if (!currentDatasetInfo) return 'No dataset selected.';
-    return 'Dataset: '+currentDatasetInfo.name+'\nGeometry type: '+(currentGeometryType || 'unknown')+'\nAttributes: '+getAttributeNames().join(', ');
+
+  async function initialize(){
+    try {
+      var capabilities = await fetchJson('/llm/capabilities.json');
+      setAvailable(capabilities.available, capabilities.reason);
+      populateModels(capabilities);
+      var sub = document.getElementById('aiHeadSub');
+      var model = (capabilities.models || []).find(function(item){ return item.id === capabilities.default_model; });
+      if (sub) sub.textContent = capabilities.available
+        ? ((model && model.provider) || 'Server') + ' · server managed'
+        : 'Unavailable';
+      replaceMessages(
+        capabilities.available ? 'info' : 'err',
+        capabilities.available
+          ? (_sessionId ? 'Continuing your saved chat session.' : 'Ask about datasets, maps, or visualization.')
+          : (capabilities.reason || 'The server does not have LLM chat configured.')
+      );
+    } catch(e) {
+      setAvailable(false, 'Could not read server LLM capabilities');
+      populateModels({models:[]});
+      replaceMessages('err', 'Could not read server LLM capabilities.');
+    }
   }
+
+  function getContext(){
+    var context = {
+      basemap:basemapMode,
+      search_query:lastSearchQuery || searchInput.value.trim()
+    };
+    if (currentDatasetInfo) context.dataset_id = currentDatasetInfo.id || currentDatasetInfo.name;
+    if (activeDatasetStyle && activeDatasetStyle.document) context.style = clone(activeDatasetStyle.document);
+    if (map) {
+      var bounds = map.getBounds();
+      var center = map.getCenter();
+      context.viewport = {
+        bounds:[bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()],
+        center:[center.lng, center.lat],
+        zoom:map.getZoom()
+      };
+    }
+    return context;
+  }
+
   window.aiToggle = function(){
+    if (!_available) return;
     var p = document.getElementById('aiPanel');
-    var wasOpen = p.classList.contains('open');
     p.classList.toggle('open');
-    if (!wasOpen) ping();
   };
+
   window.aiQuick = function(type){
+    if (!_available || _busy) return;
     var prompts = {
       describe:'What kind of data does this dataset contain?',
-      suggest:'What is the best way to visualize this dataset? Include style JSON.',
-      best:'Which numeric attribute would make the best choropleth map and why? Include style JSON.',
+      suggest:'What is the best way to visualize this dataset?',
+      best:'Which numeric attribute would make the best choropleth map and why?',
       insight:'Analyze the features currently visible on the map.',
       anomaly:'Are there any outliers or anomalies in the visible data?'
     };
     var msg = prompts[type] || type;
     addMsg('user', msg);
-    callOllama(msg);
+    callServer(msg);
   };
+
   window.aiSend = function(){
     var input = document.getElementById('aiIn');
     var msg = input ? input.value.trim() : '';
-    if (!msg) return;
+    if (!msg || !_available || _busy) return;
     input.value = '';
     addMsg('user', msg);
-    callOllama(msg);
+    callServer(msg);
   };
-  async function callOllama(userMsg){
-    var model = (document.getElementById('aiModelSelect') || {value:'llama3.2'}).value || 'llama3.2';
-    var thinking = addMsg('thinking', 'Thinking with '+model+'...');
-    _hist.push({role:'user', content:userMsg});
+
+  async function callServer(userMsg){
+    var model = (document.getElementById('aiModelSelect') || {value:''}).value;
+    var thinking = addMsg('thinking', 'Thinking...');
+    setBusy(true);
     try {
-      var res = await fetch(OLLAMA+'/api/chat', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          model:model,
-          messages:[{role:'system', content:'You are a GIS visualization assistant. Express every suggested map style as a complete MapLibre Style Specification v8 JSON document with sources and layers.'},{role:'user', content:'Current map context:\n'+getCtx()}].concat(_hist.slice(-10)),
-          stream:false
-        })
-      });
-      if (thinking) thinking.remove();
-      if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
-      var data = await res.json();
-      var reply = data.message && data.message.content || '';
-      _hist.push({role:'assistant', content:reply});
-      addMsg('bot', reply);
-      var match = reply.match(/```json([\s\S]*?)```/);
-      _pending = match ? JSON.parse(match[1].trim()) : null;
-      var apply = document.getElementById('aiApplyBtn');
-      if (apply) apply.style.display = _pending ? 'block' : 'none';
+      var data = null;
+      for (var attempt=0; attempt<2; attempt++) {
+        var payload = {message:userMsg, model_id:model, context:getContext()};
+        if (_sessionId) payload.session_id = _sessionId;
+        var response = await fetch('/llm/chat.json', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(payload)
+        });
+        data = await response.json().catch(function(){ return {}; });
+        if (response.status === 404 && _sessionId && attempt === 0) {
+          saveSession(null);
+          continue;
+        }
+        if (!response.ok) throw new Error(data.error || (response.status + ' ' + response.statusText));
+        break;
+      }
+      if (!data || !data.message) throw new Error('The server returned an invalid chat response');
+      saveSession(data.session_id);
+      addMsg('bot', data.message.content || '');
+      handleActions(data.actions || []);
     } catch(e) {
+      addMsg('err', 'Chat error: '+e.message);
+    } finally {
       if (thinking) thinking.remove();
-      addMsg('err', 'Ollama error: '+e.message);
-      _hist.pop();
+      setBusy(false);
     }
   }
-  window.aiApplyStyle = function(){
-    if (!_pending || !currentDatasetInfo) return;
-    if (_pending.version === 8 && Array.isArray(_pending.layers)) {
-      applyLocalStyleDocument(_pending);
-      addMsg('info', 'Style applied locally.');
-      _pending = null;
-      return;
-    }
-    function setSelect(id, value){
-      var el = document.getElementById(id);
-      if (!el || !value) return;
-      for (var i=0; i<el.options.length; i++) {
-        if (el.options[i].value.toLowerCase() === String(value).toLowerCase()) {
-          el.selectedIndex = i;
-          return;
-        }
+
+  function handleActions(actions){
+    actions.forEach(function(action){
+      if (!action || !action.type) return;
+      if (action.type === 'show_datasets' && Array.isArray(action.datasets)) {
+        lastSearchQuery = action.query || '';
+        lastSearchResults = action.datasets;
+        if (action.query) searchInput.value = action.query;
+        panelKicker.textContent = 'Search results';
+        panelTitle.textContent = action.query ? 'Results for "'+action.query+'"' : 'Suggested datasets';
+        renderSearchResults(lastSearchResults);
+        showPanel();
+        updateSearchControls();
+      } else if (action.type === 'change_basemap' && ['street','satellite'].indexOf(action.basemap) !== -1) {
+        basemapMode = action.basemap;
+        updateBasemapMode();
       }
-    }
-    setSelect('attributeSelect', _pending.attribute);
-    setSelect('vizType', _pending.viz);
-    setSelect('colorScheme', _pending.scheme);
-    setSelect('labelSelect', _pending.labelAttr);
-    setSelect('labelBg', _pending.labelBg);
-    applyStyle();
-    addMsg('info', 'Style applied.');
-    _pending = null;
-  };
+    });
+  }
+
+  function resetChat(){
+    saveSession(null);
+    replaceMessages('info', 'New chat. A session will be created with your next message.');
+  }
+
   var fab = document.getElementById('aiFab');
   var aiIn = document.getElementById('aiIn');
+  var reset = document.getElementById('aiResetBtn');
+  var modelSelect = document.getElementById('aiModelSelect');
   if (fab) fab.addEventListener('click', window.aiToggle);
   if (aiIn) aiIn.addEventListener('keydown', function(e){ if (e.key === 'Enter') window.aiSend(); });
+  if (reset) reset.addEventListener('click', resetChat);
+  if (modelSelect) modelSelect.addEventListener('change', resetChat);
+  initialize();
 })();

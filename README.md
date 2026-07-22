@@ -272,6 +272,44 @@ the query with the currently selected provider/model and compares it with
 stored dataset embeddings for that same provider/model. If no matching
 embedding exists, search falls back to text matching.
 
+### Chat Assistant
+
+The browser discovers chat support from `GET /llm/capabilities.json`. The
+response exposes only public provider/model labels and never returns API keys
+or provider base URLs. The chat button remains disabled when chat is disabled
+or its selected provider is missing required configuration.
+
+Send a message with `POST /llm/chat.json`:
+
+```json
+{
+  "message": "Explain the current map",
+  "model_id": "ollama:llama3.1",
+  "context": {
+    "dataset_id": "DATASET_ID",
+    "viewport": {
+      "bounds": [-118, 33, -117, 34],
+      "center": [-117.5, 33.5],
+      "zoom": 9
+    },
+    "basemap": "street",
+    "style": {}
+  }
+}
+```
+
+Do not send `session_id` on the first message. The server creates the session
+and includes its UUID in the response. Send that ID with later messages. The
+browser saves it automatically; Reset discards it, so the next message starts
+a new server-side session. Sessions and individual user/assistant messages are
+stored in `chat_sessions` and `chat_messages` in the catalog SQLite database.
+
+The response also contains an `actions` array. It is empty in the first chat
+implementation phase; its typed contract is reserved for validated dataset,
+style, navigation, basemap, and download actions. The integrated `builtin`
+backend remains available for offline enrichment and deterministic embeddings,
+but it does not provide conversational chat.
+
 If you later install the project in editable mode, the module form also works:
 
 ```bash
@@ -282,6 +320,8 @@ If you later install the project in editable mode, the module form also works:
 ## REST URLs
 
 - `GET /datasets.json`
+- `GET /llm/capabilities.json`
+- `POST /llm/chat.json` with a message, optional session ID, model ID, and map context
 - `GET /datasets.json?name=roads&geometry_type=Polygon&min_size=1000`
 - `GET /datasets.json?q=roads&semantic=1`
 - `GET /datasets/<ID>.json`
