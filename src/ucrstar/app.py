@@ -306,6 +306,13 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         dataset = require_dataset(dataset_ref)
         if not isinstance(dataset, dict):
             return dataset
+        if not dataset.get("downloads_enabled", True):
+            return jsonify(
+                {
+                    "error": "dataset downloads are disabled",
+                    "source_urls": public_source_urls(dataset.get("source") or {}),
+                }
+            ), 403
         geometry = request_geometry()
         dataset_dir = dataset_path(dataset["name"])
 
@@ -440,16 +447,39 @@ def request_geometry() -> tuple[float, float, float, float] | dict[str, Any] | N
 
 def redact_source(dataset: dict[str, Any]) -> dict[str, Any]:
     """Hide local filesystem details from HTTP responses while preserving local state."""
+    redacted = dict(dataset)
+    redacted["source_urls"] = public_source_urls(dataset.get("source") or {})
     source = dataset.get("source")
     if not source or source.get("type") != "local":
-        return dataset
-    redacted = dict(dataset)
+        return redacted
     redacted["source"] = {
         **source,
         "url": None,
         "metadata": {},
     }
     return redacted
+
+
+def public_source_urls(source: dict[str, Any]) -> list[str]:
+    metadata = source.get("metadata") or {}
+    urls: list[str] = []
+    for value in metadata.get("urls") or []:
+        if isinstance(value, str):
+            urls.append(value)
+    for file_metadata in metadata.get("files") or []:
+        if isinstance(file_metadata, dict) and isinstance(file_metadata.get("url"), str):
+            urls.append(file_metadata["url"])
+    for link in metadata.get("download_links") or []:
+        if isinstance(link, dict) and isinstance(link.get("url"), str):
+            urls.append(link["url"])
+    raw_url = source.get("url")
+    if isinstance(raw_url, str):
+        urls.extend(line.strip() for line in raw_url.splitlines() if line.strip())
+    public_urls = []
+    for url in urls:
+        if url.startswith(("http://", "https://")) and url not in public_urls:
+            public_urls.append(url)
+    return public_urls
 
 
 def public_repository(repository: dict[str, Any]) -> dict[str, Any]:

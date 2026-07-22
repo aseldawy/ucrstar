@@ -471,6 +471,45 @@ def test_small_dataset_details_select_geojson_visualization(tmp_path: Path, monk
     }
 
 
+def test_download_endpoint_respects_dataset_downloads_enabled_flag(tmp_path: Path) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "test.sqlite"
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": db_path,
+        }
+    )
+    from ucrstar.catalog import DatasetCatalog
+
+    catalog = DatasetCatalog(db_path, datasets_dir)
+    dataset = catalog.register_source(
+        "roads",
+        {
+            "type": "remote_file",
+            "url": "https://example.com/data/roads.geojson",
+            "accessed_at": "2026-01-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {"filename": "roads.geojson"},
+        },
+        downloads_enabled=False,
+        overwrite=True,
+    )
+
+    client = app.test_client()
+    detail = client.get(f"/datasets/{dataset['id']}.json").get_json()
+    response = client.get(f"/datasets/{dataset['id']}/download.geojson")
+
+    assert detail["downloads_enabled"] is False
+    assert detail["source_urls"] == ["https://example.com/data/roads.geojson"]
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "error": "dataset downloads are disabled",
+        "source_urls": ["https://example.com/data/roads.geojson"],
+    }
+
+
 def test_one_megabyte_dataset_uses_vector_tiles(tmp_path: Path, monkeypatch) -> None:
     datasets_dir = tmp_path / "datasets"
     (datasets_dir / "boundary").mkdir(parents=True)

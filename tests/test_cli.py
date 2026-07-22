@@ -436,6 +436,49 @@ def test_add_dataset_create_only_registers_remote_source_timestamp(
     assert dataset["source"]["metadata"]["content_type"] == "application/geo+json"
 
 
+def test_add_dataset_can_disable_generated_downloads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    url = "https://example.com/data/roads.geojson"
+
+    monkeypatch.setattr(
+        cli,
+        "source_reference",
+        lambda value: {
+            "type": "remote_file",
+            "url": value,
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {"filename": "roads.geojson"},
+        },
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            url,
+            "--create-only",
+            "--no-download",
+        ],
+    )
+
+    cli.main()
+
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    assert dataset["downloads_enabled"] is False
+    assert dataset["source"]["url"] == url
+
+
 def test_add_dataset_skips_existing_local_source(
     tmp_path: Path,
     monkeypatch,

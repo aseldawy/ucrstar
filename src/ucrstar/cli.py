@@ -87,6 +87,11 @@ def main() -> None:
         action="store_true",
         help="Only register the dataset source in the database; do not build or publish it.",
     )
+    add_dataset.add_argument(
+        "--no-download",
+        action="store_true",
+        help="Disable UCR Star-generated downloads for this dataset while keeping the source link.",
+    )
     add_dataset.add_argument("--zoom", type=int, default=None)
     add_dataset.add_argument("--partition-size", type=int)
     add_dataset.add_argument("--threshold", type=int)
@@ -206,6 +211,7 @@ def main() -> None:
                 args.create_only,
                 build_kwargs_from_args(args),
                 project_config,
+                downloads_enabled=not args.no_download,
             )
             LOGGER.info("Added %d dataset(s).", len(added) if isinstance(added, list) else 1)
             return
@@ -228,6 +234,7 @@ def main() -> None:
             build_kwargs_from_args(args),
             project_config,
             source_metadata,
+            downloads_enabled=not args.no_download,
         )
         if isinstance(added, list):
             LOGGER.info("Added %d dataset(s).", len(added))
@@ -469,6 +476,7 @@ def add_dataset_from_source(
     build_kwargs: dict[str, Any],
     project_config: dict[str, Any],
     source_metadata: dict[str, Any] | None = None,
+    downloads_enabled: bool = True,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     if is_ezesri_catalog_url(input_path_or_url):
         if dataset_name:
@@ -512,6 +520,7 @@ def add_dataset_from_source(
             source,
             description=(source.get("metadata") or {}).get("description"),
             overwrite=overwrite,
+            downloads_enabled=downloads_enabled,
         )
         LOGGER.info("Registered dataset '%s' in created state", dataset["name"])
         return dataset
@@ -531,6 +540,7 @@ def add_dataset_from_source(
         source,
         description=(source.get("metadata") or {}).get("description"),
         overwrite=overwrite,
+        downloads_enabled=downloads_enabled,
     )
     try:
         return process_registered_dataset(catalog, dataset, datasets_dir, overwrite, build_kwargs, project_config)

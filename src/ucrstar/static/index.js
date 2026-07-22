@@ -832,7 +832,7 @@ function renderDatasetDetails(dataset) {
   panelTitle.textContent = '';
   setDetailMode(lastSearchResults.length > 0);
   showPanel();
-  var sourceHtml = renderSource(dataset.source);
+  var sourceHtml = renderSource(dataset.source, dataset);
   panelContent.innerHTML =
     '<div class="detail-view">' +
       '<div class="detail-name">'+escapeHtml(dataset.name)+'</div>' +
@@ -895,19 +895,46 @@ function schemaIcon(type) {
   return 'Aa';
 }
 
-function renderSource(source) {
+function sourceUrls(dataset) {
+  var urls = Array.isArray(dataset.source_urls) ? dataset.source_urls.slice() : [];
+  var source = dataset.source || {};
+  if (typeof source.url === 'string') {
+    source.url.split(/\n+/).forEach(function(url){ if (url) urls.push(url.trim()); });
+  }
+  var seen = {};
+  return urls.filter(function(url){
+    if (!/^https?:\/\//.test(url) || seen[url]) return false;
+    seen[url] = true;
+    return true;
+  });
+}
+
+function renderSource(source, dataset) {
+  var urls = sourceUrls(dataset || {source: source});
   if (!source || source.type === 'local') return source ? '<div class="source-row"><span>Local file</span></div>' : '';
-  if (!source.url) return '';
+  if (!source.url && !urls.length) return '';
   var label = 'Source';
   var updated = source.modified_at ? 'Updated '+escapeHtml(formatDateTime(source.modified_at)) : 'Last update unknown';
-  var href = /^https?:\/\//.test(source.url) ? source.url : '';
-  if (href) {
-    return '<div class="source-row"><a href="'+escapeHtml(href)+'" target="_blank" rel="noreferrer">'+escapeHtml(label)+'</a><span>'+updated+'</span></div>';
+  if (urls.length) {
+    return '<div class="source-row">'+urls.map(function(href, index){
+      var sourceLabel = urls.length > 1 ? label+' '+(index + 1) : label;
+      return '<a href="'+escapeHtml(href)+'" target="_blank" rel="noreferrer">'+escapeHtml(sourceLabel)+'</a>';
+    }).join(' ')+'<span>'+updated+'</span></div>';
   }
   return '';
 }
 
 function renderDownloadControls(dataset) {
+  if (dataset.downloads_enabled === false) {
+    var urls = sourceUrls(dataset);
+    if (urls.length) {
+      return '<div class="download-row-new"><strong>Download</strong>'+urls.map(function(href, index){
+        var label = urls.length > 1 ? 'Source '+(index + 1) : 'Original source';
+        return '<a class="download-link" href="'+escapeHtml(href)+'" target="_blank" rel="noreferrer">'+escapeHtml(label)+'</a>';
+      }).join('')+'</div>';
+    }
+    return '<div class="download-row-new"><strong>Download</strong><span>Unavailable</span></div>';
+  }
   var options = DOWNLOAD_FORMATS.map(function(fmt){
     return '<option value="'+fmt.value+'">'+escapeHtml(fmt.label)+'</option>';
   }).join('');

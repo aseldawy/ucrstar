@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS datasets (
     source_accessed_at TEXT,
     source_modified_at TEXT,
     source_metadata_json TEXT,
+    downloads_enabled INTEGER NOT NULL DEFAULT 1,
     dataset_state TEXT NOT NULL DEFAULT 'published',
     error_message TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
@@ -180,6 +181,7 @@ class DatasetCatalog:
             ensure_column(conn, "datasets", "source_accessed_at", "TEXT")
             ensure_column(conn, "datasets", "source_modified_at", "TEXT")
             ensure_column(conn, "datasets", "source_metadata_json", "TEXT")
+            ensure_column(conn, "datasets", "downloads_enabled", "INTEGER NOT NULL DEFAULT 1")
             ensure_column(conn, "datasets", "dataset_state", "TEXT NOT NULL DEFAULT 'published'")
             ensure_column(conn, "datasets", "error_message", "TEXT")
             self._ensure_default_repository(conn)
@@ -479,6 +481,7 @@ class DatasetCatalog:
         description: str | None = None,
         repository_id: str | None = None,
         overwrite: bool = False,
+        downloads_enabled: bool = True,
     ) -> dict[str, Any]:
         """Register source metadata for a dataset before it has been processed."""
         self.init_db()
@@ -512,6 +515,7 @@ class DatasetCatalog:
                         source_accessed_at = ?,
                         source_modified_at = ?,
                         source_metadata_json = ?,
+                        downloads_enabled = ?,
                         dataset_state = 'created',
                         error_message = NULL,
                         metadata_json = '{}',
@@ -527,6 +531,7 @@ class DatasetCatalog:
                         source.get("accessed_at"),
                         source.get("modified_at"),
                         json.dumps(source.get("metadata") or {}),
+                        1 if downloads_enabled else 0,
                         dataset_id,
                     ),
                 )
@@ -540,9 +545,10 @@ class DatasetCatalog:
                     id, repository_id, name, description, size_bytes, geometry_types,
                     source_type, source_url, source_accessed_at,
                     source_modified_at, source_metadata_json,
+                    downloads_enabled,
                     dataset_state, error_message, metadata_json, summary_json
                 )
-                VALUES (?, ?, ?, ?, 0, '[]', ?, ?, ?, ?, ?, 'created', NULL, '{}', '{}')
+                VALUES (?, ?, ?, ?, 0, '[]', ?, ?, ?, ?, ?, ?, 'created', NULL, '{}', '{}')
                 """,
                 (
                     dataset_id,
@@ -554,6 +560,7 @@ class DatasetCatalog:
                     source.get("accessed_at"),
                     source.get("modified_at"),
                     json.dumps(source.get("metadata") or {}),
+                    1 if downloads_enabled else 0,
                 ),
             )
         return self.get(dataset_id) or {}
@@ -939,6 +946,8 @@ def decode_row(row: sqlite3.Row) -> dict[str, Any]:
         )
     if "style_json" in result:
         result["style"] = result.pop("style_json")
+    if "downloads_enabled" in result:
+        result["downloads_enabled"] = bool(result["downloads_enabled"])
     if "source_type" in result:
         result["source"] = {
             "type": result.pop("source_type"),

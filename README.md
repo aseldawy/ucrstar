@@ -51,6 +51,7 @@ CLI commands log progress to the console at `INFO` level by default. Use
 .venv/bin/python src/ucrstar/cli.py add-dataset https://example.com/roads.geojson https://example.com/parks.geojson --name osm21
 .venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads --create-only
 .venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads --schema-doc roads.metadata.json
+.venv/bin/python src/ucrstar/cli.py add-dataset https://example.com/private.geojson --name private --no-download
 .venv/bin/python src/ucrstar/cli.py add-dataset https://egis-lacounty.hub.arcgis.com/search --create-only
 .venv/bin/python src/ucrstar/cli.py add-datasets https://www.ezesri.com/catalog.json --create-only
 ```
@@ -102,6 +103,12 @@ dataset description and attribute explanations:
 These values are stored with the source metadata, merged into the Starlet
 summary, saved in the catalog schema, and used later by search and the chat
 assistant. `--description` overrides the description from `--schema-doc`.
+
+Use `--no-download` to mark a dataset as unavailable for UCR Star-generated
+downloads. The REST download endpoints then return `403`, and the frontend hides
+the current-view/all export links. Public original source URLs remain exposed as
+source links so users can still download from the upstream provider when a URL is
+available.
 
 When `add-dataset` points to an Esri Hub repository URL such as
 `https://egis-lacounty.hub.arcgis.com/search`, it scans the repository and
