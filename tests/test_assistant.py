@@ -1,11 +1,19 @@
 import json
+import multiprocessing
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
 
 from ucrstar.app import create_app
-from ucrstar.assistant_tools import ViewportSummarizer, hybrid_rank, validate_action
+from ucrstar.assistant_tools import (
+    GeoDataFrameQueryRunner,
+    ViewportSummarizer,
+    hybrid_rank,
+    normalize_dataframe_query,
+    validate_action,
+)
 from ucrstar.assistant_style import build_assistant_style
 from ucrstar.chat import compact_dataset, parse_assistant_plan
 
@@ -37,6 +45,16 @@ class FakeGeocoder:
     def search(self, query: str, *, limit: int = 5) -> list[dict]:
         self.queries.append((query, limit))
         return self.results
+
+
+class RecordingDataFrameQueryRunner:
+    def __init__(self, result: dict) -> None:
+        self.result = result
+        self.calls: list[tuple[dict, list[float], dict]] = []
+
+    def run(self, dataset: dict, bounds: list[float], query: dict) -> dict:
+        self.calls.append((dataset, bounds, query))
+        return self.result
 
 
 class FakeBatch:
@@ -72,17 +90,19 @@ def assistant_app(
     *,
     geocoder=None,
     chat_config=None,
+    dataframe_query_runner=None,
 ):
-    return create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": tmp_path / "datasets",
-            "DATABASE": tmp_path / "instance" / "test.sqlite",
-            "UCRSTAR2_CONFIG": assistant_config(**(chat_config or {})),
-            "LLM_CLIENT": llm,
-            "GEOCODER": geocoder or FakeGeocoder([]),
-        }
-    )
+    config = {
+        "TESTING": True,
+        "DATASETS_DIR": tmp_path / "datasets",
+        "DATABASE": tmp_path / "instance" / "test.sqlite",
+        "UCRSTAR2_CONFIG": assistant_config(**(chat_config or {})),
+        "LLM_CLIENT": llm,
+        "GEOCODER": geocoder or FakeGeocoder([]),
+    }
+    if dataframe_query_runner is not None:
+        config["DATAFRAME_QUERY_RUNNER"] = dataframe_query_runner
+    return create_app(config)
 
 
 def publish_dataset(app, name: str, description: str = "") -> dict:
@@ -549,6 +569,123 @@ def test_viewport_summary_queries_server_data_and_is_used_for_answer(
     assert '"geometry":' not in synthesis_prompt
 
 
+def test_dataframe_query_tool_returns_a_small_grounded_viewport_answer(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingDataFrameQueryRunner(
+        {
+            "dataset_id": "dataset-id",
+            "scope": "current_viewport",
+            "operation": "records",
+            "matched_features": 1,
+            "columns": ["_id", "kind"],
+            "rows": [{"_id": 42, "kind": "park"}],
+            "truncated": False,
+        }
+    )
+    llm = PlanningLLM(
+        [
+            plan(
+                [
+                    {
+                        "name": "query_dataframe",
+                        "arguments": {
+                            "where": [
+                                {
+                                    "attribute": "kind",
+                                    "operator": "eq",
+                                    "value": "park",
+                                }
+                            ],
+                            "operation": "records",
+                            "select": ["_id", "kind"],
+                            "limit": 5,
+                        },
+                    }
+                ]
+            ),
+            final_message("Feature 42 is the visible park."),
+        ]
+    )
+    app = assistant_app(tmp_path, llm, dataframe_query_runner=runner)
+    dataset = configure_vector_dataset(
+        app,
+        publish_dataset(app, "areas")["id"],
+    )
+    bounds = [-118.0, 33.0, -117.0, 34.0]
+
+    response = app.test_client().post(
+        "/llm/chat.json",
+        json={
+            "message": "Which visible feature is a park?",
+            "context": {
+                "dataset_id": dataset["id"],
+                "viewport": {"bounds": bounds, "center": [-117.5, 33.5], "zoom": 9},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["message"]["content"] == "Feature 42 is the visible park."
+    assert response.get_json()["actions"] == []
+    assert len(runner.calls) == 1
+    _, called_bounds, called_query = runner.calls[0]
+    assert called_bounds == bounds
+    assert called_query == {
+        "where": [
+            {
+                "attribute": "kind",
+                "operator": "eq",
+                "value": "park",
+                "case_sensitive": True,
+            }
+        ],
+        "combine": "and",
+        "operation": "records",
+        "limit": 5,
+        "select": ["_id", "kind"],
+    }
+    assert '"rows":[{"_id":42,"kind":"park"}]' in llm.calls[1][-1]["content"]
+
+
+def test_dataframe_query_tool_requires_viewport_and_schema_fields(tmp_path: Path) -> None:
+    runner = RecordingDataFrameQueryRunner({})
+    llm = PlanningLLM(
+        [
+            plan(
+                [
+                    {
+                        "name": "query_dataframe",
+                        "arguments": {
+                            "operation": "records",
+                            "select": ["missing"],
+                        },
+                    }
+                ]
+            ),
+            final_message("I need a valid viewport and field."),
+        ]
+    )
+    app = assistant_app(tmp_path, llm, dataframe_query_runner=runner)
+    dataset = configure_vector_dataset(
+        app,
+        publish_dataset(app, "areas")["id"],
+    )
+
+    response = app.test_client().post(
+        "/llm/chat.json",
+        json={
+            "message": "Find the missing property",
+            "context": {"dataset_id": dataset["id"]},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["actions"] == []
+    assert runner.calls == []
+    assert "current viewport is unavailable" in llm.calls[1][-1]["content"]
+
+
 def test_viewport_summary_is_bounded_and_marks_truncation(
     tmp_path: Path,
     monkeypatch,
@@ -581,6 +718,145 @@ def test_viewport_summary_is_bounded_and_marks_truncation(
     assert summary["scanned_features"] == 2
     assert summary["truncated"] is True
     assert summary["sample_records"] == [{"name": "A", "value": 1}]
+
+
+def test_geodataframe_runner_filters_records_in_an_isolated_process(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pandas = pytest.importorskip("pandas")
+    frame = pandas.DataFrame(
+        [
+            {"_id": 1, "kind": "Park", "name": "North"},
+            {"_id": 2, "kind": "school", "name": "Central"},
+            {"_id": 3, "kind": "park", "name": "South"},
+        ]
+    )
+    monkeypatch.setattr(
+        "starlet.query_dataset",
+        lambda *args, **kwargs: [frame],
+    )
+    dataset = {
+        "id": "dataset-id",
+        "name": "places",
+        "schema": [
+            {"name": "kind", "type": "string"},
+            {"name": "name", "type": "string"},
+        ],
+    }
+    (tmp_path / "places").mkdir()
+    query = normalize_dataframe_query(
+        {
+            "where": [
+                {
+                    "attribute": "kind",
+                    "operator": "eq",
+                    "value": "park",
+                    "case_sensitive": False,
+                }
+            ],
+            "operation": "records",
+            "select": ["_id", "name"],
+            "limit": 10,
+        },
+        dataset,
+    )
+    runner = GeoDataFrameQueryRunner(
+        tmp_path,
+        timeout_seconds=2,
+        process_start_method="fork",
+    )
+
+    result = runner.run(dataset, [-1, -1, 1, 1], query)
+
+    assert result["matched_features"] == 2
+    assert result["rows"] == [
+        {"_id": 1, "name": "North"},
+        {"_id": 3, "name": "South"},
+    ]
+    assert result["truncated"] is False
+
+
+def test_geodataframe_runner_terminates_a_timed_out_process(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def slow_query(*args, **kwargs):
+        time.sleep(10)
+        return []
+
+    monkeypatch.setattr("starlet.query_dataset", slow_query)
+    dataset = {"id": "dataset-id", "name": "places", "schema": []}
+    (tmp_path / "places").mkdir()
+    query = normalize_dataframe_query(
+        {"operation": "count"},
+        dataset,
+    )
+    runner = GeoDataFrameQueryRunner(
+        tmp_path,
+        timeout_seconds=0.1,
+        process_start_method="fork",
+    )
+    started = time.monotonic()
+
+    with pytest.raises(ValueError, match="exceeded the 0.1-second time limit"):
+        runner.run(dataset, [-1, -1, 1, 1], query)
+
+    assert time.monotonic() - started < 2
+    assert not any(
+        process.name == "ucrstar-dataframe-query"
+        for process in multiprocessing.active_children()
+    )
+
+
+def test_geodataframe_runner_rejects_oversized_results(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pandas = pytest.importorskip("pandas")
+    monkeypatch.setattr(
+        "starlet.query_dataset",
+        lambda *args, **kwargs: [pandas.DataFrame([{"description": "x" * 5_000}])],
+    )
+    dataset = {
+        "id": "dataset-id",
+        "name": "places",
+        "schema": [{"name": "description", "type": "string"}],
+    }
+    (tmp_path / "places").mkdir()
+    query = normalize_dataframe_query(
+        {"operation": "records", "select": ["description"], "limit": 1},
+        dataset,
+    )
+    runner = GeoDataFrameQueryRunner(
+        tmp_path,
+        timeout_seconds=2,
+        max_result_bytes=1_000,
+        process_start_method="fork",
+    )
+
+    with pytest.raises(ValueError, match="exceeded the response size limit"):
+        runner.run(dataset, [-1, -1, 1, 1], query)
+
+
+def test_dataframe_query_rejects_code_and_unknown_attributes() -> None:
+    dataset = {
+        "schema": [{"name": "kind", "type": "string"}],
+    }
+    with pytest.raises(ValueError, match="Unsupported dataframe query options"):
+        normalize_dataframe_query(
+            {
+                "expression": "__import__('os').system('echo unsafe')",
+                "operation": "records",
+                "select": ["kind"],
+            },
+            dataset,
+        )
+    with pytest.raises(ValueError, match='Attribute "missing"'):
+        normalize_dataframe_query(
+            {"operation": "records", "select": ["missing"]},
+            dataset,
+        )
 
 
 def test_invalid_tool_arguments_return_no_action_and_an_error_trace(tmp_path: Path) -> None:

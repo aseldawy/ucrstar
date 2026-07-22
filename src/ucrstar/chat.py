@@ -141,6 +141,7 @@ class LLMRegistry:
                 "server_history": available,
                 "semantic_search": semantic_search,
                 "viewport_summary": available,
+                "viewport_dataframe_query": available,
                 "style_generation": available,
                 "feature_highlight": available,
                 "text_labels": available,

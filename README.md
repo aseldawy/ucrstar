@@ -319,6 +319,18 @@ The limits are configured under `llm.chat` with `viewport_max_features`,
 `viewport_sample_size`, `viewport_max_attributes`, and `viewport_top_values`.
 Geocoding endpoint, user agent, and timeout are configured under `llm.geocoding`.
 
+For small, targeted questions about visible records, the assistant can use the
+`query_dataframe` tool. It applies a structured, read-only filter to GeoPandas batches in
+the current viewport and can return selected records, a count, distinct values, or a
+`min`, `max`, `mean`, or `sum`. The tool does not accept Python code or free-form pandas
+expressions. It runs in a dedicated child process with a hard deadline of at most five
+seconds; a timed-out worker is terminated, killed if necessary, and joined before the
+request returns. Feature scans and serialized response bytes are also bounded, and an
+oversized result is reported as a tool failure rather than being sent to the model. The
+limits are configured with `dataframe_query_timeout_seconds`,
+`dataframe_query_max_result_bytes`, `dataframe_query_max_scanned_features`, and
+`dataframe_query_batch_size` under `llm.chat` and remain subject to server-side hard caps.
+
 Conversational styling returns a validated `apply_style` action containing a complete
 MapLibre v8 dataset style. It supports data expressions, filters, zoom-dependent styling,
 heatmaps, fill extrusions, categorical classes, palettes, outlines, and other

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import multiprocessing
 import re
 import urllib.parse
 import urllib.request
@@ -33,6 +34,19 @@ Available tools (request them only through tool_calls):
 - change_basemap: {"basemap": "street"|"satellite"}.
 - summarize_viewport: {}. Query and summarize the selected dataset inside the current
   viewport. Use this before describing visible features, values, patterns, or anomalies.
+- query_dataframe: {"where"?: [{"attribute": string, "operator":
+  "eq"|"ne"|"lt"|"lte"|"gt"|"gte"|"in"|"not_in"|"contains"|
+  "starts_with"|"ends_with"|"is_null"|"not_null", "value"?: scalar|array,
+  "case_sensitive"?: boolean}], "combine"?: "and"|"or", "operation"?:
+  "records"|"count"|"distinct"|"min"|"max"|"mean"|"sum", "select"?:
+  [attribute], "attribute"?: string, "limit"?: integer}. Run a bounded GeoPandas
+  dataframe query over the selected dataset inside the current viewport. Use it to answer
+  small, specific questions about matching properties or values. Use find_attributes first
+  when the field is uncertain. records requires select; distinct/min/max/mean/sum require
+  attribute; count requires neither. This tool is read-only, runs in an isolated process
+  with a hard five-second deadline, and fails instead of returning an oversized result. It
+  accepts only this structured query form; never provide Python code or a pandas query
+  expression.
 - find_attributes: {"query": string, "dataset_id"?: string}. Search the complete schema
   of the selected dataset by field name and description. Use this before claiming that an
   attribute is absent, especially when dataset.schema_truncated is true, and when the user
@@ -204,6 +218,284 @@ class ViewportSummarizer:
         }
 
 
+@dataclass
+class GeoDataFrameQueryRunner:
+    datasets_dir: Path
+    timeout_seconds: float = 5.0
+    max_result_bytes: int = 32_000
+    max_scanned_features: int = 50_000
+    batch_size: int = 1_000
+    process_start_method: str = "spawn"
+
+    def run(
+        self,
+        dataset: dict[str, Any],
+        bounds: list[float],
+        query: dict[str, Any],
+    ) -> dict[str, Any]:
+        dataset_name = dataset.get("name")
+        if not isinstance(dataset_name, str) or not dataset_name:
+            raise ValueError("The selected dataset has no queryable storage path")
+        root = Path(self.datasets_dir).resolve()
+        dataset_dir = (root / dataset_name).resolve()
+        try:
+            dataset_dir.relative_to(root)
+            if dataset_dir == root:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("The selected dataset storage path is invalid") from exc
+
+        timeout = min(5.0, max(0.05, float(self.timeout_seconds)))
+        payload = {
+            "dataset_dir": str(dataset_dir),
+            "dataset_id": str(dataset.get("id") or ""),
+            "dataset_name": dataset_name,
+            "bounds": bounds,
+            "query": query,
+            "max_result_bytes": min(64_000, max(1_000, int(self.max_result_bytes))),
+            "max_scanned_features": min(
+                100_000, max(1, int(self.max_scanned_features))
+            ),
+            "batch_size": min(5_000, max(1, int(self.batch_size))),
+        }
+        process_context = multiprocessing.get_context(self.process_start_method)
+        receiver, sender = process_context.Pipe(duplex=False)
+        process = process_context.Process(
+            target=_dataframe_query_worker,
+            args=(sender, payload),
+            name="ucrstar-dataframe-query",
+            daemon=True,
+        )
+        try:
+            process.start()
+            sender.close()
+            if not receiver.poll(timeout):
+                _terminate_process(process)
+                raise ValueError(
+                    f"GeoPandas query exceeded the {timeout:g}-second time limit"
+                )
+            response = receiver.recv()
+            process.join(0.25)
+            if process.is_alive():
+                _terminate_process(process)
+            if not isinstance(response, dict) or response.get("status") not in {
+                "complete",
+                "error",
+            }:
+                raise ValueError("GeoPandas query worker returned an invalid response")
+            if response["status"] == "error":
+                raise ValueError(str(response.get("error") or "GeoPandas query failed")[:500])
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise ValueError("GeoPandas query worker returned an invalid result")
+            return result
+        except (EOFError, OSError) as exc:
+            if process.is_alive():
+                _terminate_process(process)
+            raise ValueError("GeoPandas query worker stopped without a result") from exc
+        finally:
+            receiver.close()
+            try:
+                sender.close()
+            except OSError:
+                pass
+            if process.is_alive():
+                _terminate_process(process)
+
+
+def _terminate_process(process: Any) -> None:
+    """Synchronously stop a query worker; never leave timed-out work running."""
+    if not process.is_alive():
+        process.join()
+        return
+    process.terminate()
+    process.join(0.5)
+    if process.is_alive():
+        process.kill()
+        process.join()
+
+
+def _dataframe_query_worker(sender: Any, payload: dict[str, Any]) -> None:
+    try:
+        result = execute_dataframe_query(payload)
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > payload["max_result_bytes"]:
+            raise ValueError(
+                "GeoPandas query result exceeded the response size limit"
+            )
+        sender.send({"status": "complete", "result": result})
+    except Exception as exc:
+        sender.send({"status": "error", "error": str(exc)[:500]})
+    finally:
+        sender.close()
+
+
+def execute_dataframe_query(payload: dict[str, Any]) -> dict[str, Any]:
+    import pandas as pd
+
+    query = payload["query"]
+    operation = query["operation"]
+    limit = query["limit"]
+    selected = query.get("select") or []
+    aggregate_attribute = query.get("attribute")
+    scanned = 0
+    matched = 0
+    rows: list[dict[str, Any]] = []
+    distinct_values: dict[str, Any] = {}
+    aggregate_value: Any = None
+    numeric_sum = 0.0
+    numeric_count = 0
+
+    batches = starlet.query_dataset(
+        payload["dataset_dir"],
+        tuple(payload["bounds"]),
+        batch_size=payload["batch_size"],
+    )
+    for frame in batches:
+        scanned += len(frame)
+        if scanned > payload["max_scanned_features"]:
+            raise ValueError("GeoPandas query exceeded the feature scan limit")
+        filtered = filter_dataframe(frame, query["where"], query["combine"], pd)
+        matched += len(filtered)
+        if operation == "records":
+            for values in filtered[selected].itertuples(index=False, name=None):
+                if len(rows) >= limit:
+                    break
+                rows.append(
+                    {
+                        column: dataframe_json_value(value)
+                        for column, value in zip(selected, values)
+                    }
+                )
+        elif operation == "distinct":
+            for value in filtered[aggregate_attribute].dropna().tolist():
+                clean = dataframe_json_value(value)
+                key = json.dumps(clean, ensure_ascii=False, sort_keys=True, default=str)
+                distinct_values.setdefault(key, clean)
+                if len(distinct_values) > limit:
+                    raise ValueError(
+                        "GeoPandas distinct result exceeded the requested value limit"
+                    )
+        elif operation in {"min", "max"}:
+            series = filtered[aggregate_attribute].dropna()
+            if len(series):
+                candidate = series.min() if operation == "min" else series.max()
+                if aggregate_value is None:
+                    aggregate_value = candidate
+                elif operation == "min":
+                    aggregate_value = min(aggregate_value, candidate)
+                else:
+                    aggregate_value = max(aggregate_value, candidate)
+        elif operation in {"mean", "sum"}:
+            numeric = pd.to_numeric(
+                filtered[aggregate_attribute], errors="coerce"
+            ).dropna()
+            numeric_sum += float(numeric.sum())
+            numeric_count += int(numeric.count())
+
+    result: dict[str, Any] = {
+        "dataset_id": payload["dataset_id"],
+        "dataset_name": payload["dataset_name"],
+        "scope": "current_viewport",
+        "bounds": payload["bounds"],
+        "operation": operation,
+        "scanned_features": scanned,
+        "matched_features": matched,
+    }
+    if operation == "records":
+        result["columns"] = selected
+        result["rows"] = rows
+        result["truncated"] = matched > len(rows)
+    elif operation == "count":
+        result["value"] = matched
+    elif operation == "distinct":
+        result["attribute"] = aggregate_attribute
+        result["values"] = list(distinct_values.values())
+    elif operation in {"min", "max"}:
+        result["attribute"] = aggregate_attribute
+        result["value"] = dataframe_json_value(aggregate_value)
+    elif operation == "sum":
+        result["attribute"] = aggregate_attribute
+        result["value"] = numeric_sum if numeric_count else None
+    elif operation == "mean":
+        result["attribute"] = aggregate_attribute
+        result["value"] = numeric_sum / numeric_count if numeric_count else None
+    return result
+
+
+def filter_dataframe(frame: Any, conditions: list[dict[str, Any]], combine: str, pd: Any) -> Any:
+    if not conditions:
+        return frame
+    mask = pd.Series(combine == "and", index=frame.index, dtype=bool)
+    for condition in conditions:
+        condition_mask = dataframe_condition_mask(frame, condition)
+        mask = mask & condition_mask if combine == "and" else mask | condition_mask
+    return frame.loc[mask]
+
+
+def dataframe_condition_mask(frame: Any, condition: dict[str, Any]) -> Any:
+    series = frame[condition["attribute"]]
+    operator = condition["operator"]
+    value = condition.get("value")
+    case_sensitive = condition.get("case_sensitive", True)
+    if operator == "is_null":
+        return series.isna()
+    if operator == "not_null":
+        return series.notna()
+    if not case_sensitive:
+        series = series.astype("string").str.casefold()
+        if isinstance(value, list):
+            value = [str(item).casefold() for item in value]
+        else:
+            value = str(value).casefold()
+    if operator == "eq":
+        return series == value
+    if operator == "ne":
+        return series != value
+    if operator == "lt":
+        return series < value
+    if operator == "lte":
+        return series <= value
+    if operator == "gt":
+        return series > value
+    if operator == "gte":
+        return series >= value
+    if operator == "in":
+        return series.isin(value)
+    if operator == "not_in":
+        return ~series.isin(value)
+    text = series.astype("string")
+    if not case_sensitive:
+        text = text.str.casefold()
+    if operator == "contains":
+        return text.str.contains(str(value), regex=False, na=False)
+    if operator == "starts_with":
+        return text.str.startswith(str(value), na=False)
+    if operator == "ends_with":
+        return text.str.endswith(str(value), na=False)
+    raise ValueError("Unsupported dataframe query operator")
+
+
+def dataframe_json_value(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        if bool(value != value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    value = json_scalar(value)
+    if isinstance(value, str | bool | int) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return str(value)
+
+
 def clean_record(record: dict[str, Any]) -> dict[str, Any]:
     return {
         str(key): json_scalar(value)
@@ -368,6 +660,7 @@ class AssistantTools:
     catalog: DatasetCatalog
     geocoder: Any
     viewport_summarizer: ViewportSummarizer
+    dataframe_query_runner: Any
     search_limit: int = 10
     semantic_max_distance: float = 0.8
     style_max_chars: int = 40_000
@@ -401,6 +694,8 @@ class AssistantTools:
                 result, actions = self.change_basemap(arguments)
             elif name == "summarize_viewport":
                 result, actions = self.summarize_viewport(context)
+            elif name == "query_dataframe":
+                result, actions = self.query_dataframe(arguments, context)
             elif name == "find_attributes":
                 result, actions = self.find_attributes(arguments, context)
             elif name == "apply_style":
@@ -543,6 +838,24 @@ class AssistantTools:
         if not valid_bounds(bounds):
             raise ValueError("The current viewport is unavailable")
         return self.viewport_summarizer.summarize(dataset_id, bounds), []
+
+    def query_dataframe(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset(arguments, context)
+        viewport = context.get("viewport") or {}
+        bounds = viewport.get("bounds") if isinstance(viewport, dict) else None
+        if not valid_bounds(bounds):
+            raise ValueError("The current viewport is unavailable")
+        query = normalize_dataframe_query(arguments, dataset)
+        result = self.dataframe_query_runner.run(
+            dataset,
+            [float(value) for value in bounds],
+            query,
+        )
+        return result, []
 
     def find_attributes(
         self,
@@ -785,6 +1098,166 @@ def public_dataset_result(dataset: dict[str, Any]) -> dict[str, Any]:
         "mbr": dataset.get("mbr"),
         "dataset_state": dataset.get("dataset_state"),
     }
+
+
+DATAFRAME_QUERY_OPERATORS = {
+    "eq",
+    "ne",
+    "lt",
+    "lte",
+    "gt",
+    "gte",
+    "in",
+    "not_in",
+    "contains",
+    "starts_with",
+    "ends_with",
+    "is_null",
+    "not_null",
+}
+DATAFRAME_QUERY_OPERATIONS = {"records", "count", "distinct", "min", "max", "mean", "sum"}
+
+
+def normalize_dataframe_query(
+    arguments: dict[str, Any],
+    dataset: dict[str, Any],
+) -> dict[str, Any]:
+    unknown = set(arguments) - {
+        "dataset_id",
+        "where",
+        "combine",
+        "operation",
+        "select",
+        "attribute",
+        "limit",
+    }
+    if unknown:
+        raise ValueError(
+            "Unsupported dataframe query options: " + ", ".join(sorted(unknown))
+        )
+    queryable_attributes = {
+        str(field.get("name"))
+        for field in (dataset.get("schema") or [])
+        if isinstance(field, dict)
+        and field.get("name")
+        and str(field.get("role") or "").lower() != "geometry"
+        and str(field.get("name")).lower() != "geometry"
+    }
+    queryable_attributes.add("_id")
+
+    where = arguments.get("where", [])
+    if not isinstance(where, list) or len(where) > 10:
+        raise ValueError("where must be an array with at most 10 conditions")
+    normalized_where = [
+        normalize_dataframe_condition(condition, queryable_attributes)
+        for condition in where
+    ]
+    combine = arguments.get("combine", "and")
+    if combine not in {"and", "or"}:
+        raise ValueError("combine must be 'and' or 'or'")
+    operation = arguments.get("operation", "records")
+    if operation not in DATAFRAME_QUERY_OPERATIONS:
+        raise ValueError("Unsupported dataframe query operation")
+    limit = arguments.get("limit", 10)
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= (50 if operation == "distinct" else 20)
+    ):
+        raise ValueError("limit is outside the allowed range")
+
+    result: dict[str, Any] = {
+        "where": normalized_where,
+        "combine": combine,
+        "operation": operation,
+        "limit": limit,
+    }
+    select = arguments.get("select")
+    if operation == "records":
+        if (
+            not isinstance(select, list)
+            or not select
+            or len(select) > 10
+            or any(not isinstance(name, str) or not name for name in select)
+        ):
+            raise ValueError("records queries require 1 to 10 selected attributes")
+        normalized_select = list(dict.fromkeys(select))
+        for attribute in normalized_select:
+            require_queryable_attribute(attribute, queryable_attributes)
+        result["select"] = normalized_select
+    elif select is not None:
+        raise ValueError("select is supported only for records queries")
+
+    attribute = arguments.get("attribute")
+    if operation in {"distinct", "min", "max", "mean", "sum"}:
+        if not isinstance(attribute, str) or not attribute:
+            raise ValueError(f"{operation} queries require attribute")
+        require_queryable_attribute(attribute, queryable_attributes)
+        result["attribute"] = attribute
+    elif attribute is not None:
+        raise ValueError("attribute is not used by this dataframe query operation")
+    return result
+
+
+def normalize_dataframe_condition(
+    condition: Any,
+    queryable_attributes: set[str],
+) -> dict[str, Any]:
+    if not isinstance(condition, dict):
+        raise ValueError("Each dataframe query condition must be an object")
+    unknown = set(condition) - {"attribute", "operator", "value", "case_sensitive"}
+    if unknown:
+        raise ValueError(
+            "Unsupported dataframe condition options: " + ", ".join(sorted(unknown))
+        )
+    attribute = condition.get("attribute")
+    if not isinstance(attribute, str) or not attribute:
+        raise ValueError("Each dataframe query condition requires an attribute")
+    require_queryable_attribute(attribute, queryable_attributes)
+    operator = condition.get("operator")
+    if operator not in DATAFRAME_QUERY_OPERATORS:
+        raise ValueError("Unsupported dataframe query operator")
+    case_sensitive = condition.get("case_sensitive", True)
+    if not isinstance(case_sensitive, bool):
+        raise ValueError("case_sensitive must be a boolean")
+    normalized = {
+        "attribute": attribute,
+        "operator": operator,
+        "case_sensitive": case_sensitive,
+    }
+    if operator in {"is_null", "not_null"}:
+        if "value" in condition:
+            raise ValueError(f"{operator} does not accept a value")
+        return normalized
+    if "value" not in condition:
+        raise ValueError(f"{operator} requires a value")
+    value = condition["value"]
+    if operator in {"in", "not_in"}:
+        if not isinstance(value, list) or not value or len(value) > 100:
+            raise ValueError(f"{operator} requires an array of 1 to 100 scalar values")
+        normalized["value"] = [dataframe_query_scalar(item) for item in value]
+    else:
+        normalized["value"] = dataframe_query_scalar(value)
+    if operator in {"contains", "starts_with", "ends_with"} and not isinstance(
+        normalized["value"], str
+    ):
+        raise ValueError(f"{operator} requires a string value")
+    return normalized
+
+
+def dataframe_query_scalar(value: Any) -> str | bool | int | float | None:
+    if value is None or isinstance(value, str | bool | int):
+        if isinstance(value, str) and len(value) > 1_000:
+            raise ValueError("Dataframe query string values are limited to 1000 characters")
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    raise ValueError("Dataframe query values must be finite JSON scalars")
+
+
+def require_queryable_attribute(attribute: str, queryable_attributes: set[str]) -> None:
+    if attribute not in queryable_attributes:
+        raise ValueError(f'Attribute "{attribute}" is not present in the dataset schema')
 
 
 def require_dataset_attribute(dataset: dict[str, Any], attribute: str) -> None:

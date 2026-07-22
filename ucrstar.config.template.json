@@ -20,7 +20,11 @@
       "viewport_max_features": 5000,
       "viewport_sample_size": 5,
       "viewport_max_attributes": 20,
-      "viewport_top_values": 5
+      "viewport_top_values": 5,
+      "dataframe_query_timeout_seconds": 5,
+      "dataframe_query_max_result_bytes": 32000,
+      "dataframe_query_max_scanned_features": 50000,
+      "dataframe_query_batch_size": 1000
     },
     "geocoding": {
       "base_url": "https://nominatim.openstreetmap.org/search",

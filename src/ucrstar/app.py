@@ -25,7 +25,12 @@ from flask import (
 )
 from werkzeug.serving import WSGIRequestHandler
 
-from .assistant_tools import AssistantTools, NominatimGeocoder, ViewportSummarizer
+from .assistant_tools import (
+    AssistantTools,
+    GeoDataFrameQueryRunner,
+    NominatimGeocoder,
+    ViewportSummarizer,
+)
 from .assistant_style import client_safe_style
 from .catalog import DatasetCatalog
 from .chat import (
@@ -104,6 +109,21 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
             sample_size=int(chat_config.get("viewport_sample_size", 5)),
             max_attributes=int(chat_config.get("viewport_max_attributes", 20)),
             top_values=int(chat_config.get("viewport_top_values", 5)),
+        ),
+        app.config.get("DATAFRAME_QUERY_RUNNER")
+        or GeoDataFrameQueryRunner(
+            Path(app.config["DATASETS_DIR"]),
+            timeout_seconds=min(
+                5.0,
+                float(chat_config.get("dataframe_query_timeout_seconds", 5)),
+            ),
+            max_result_bytes=int(
+                chat_config.get("dataframe_query_max_result_bytes", 32_000)
+            ),
+            max_scanned_features=int(
+                chat_config.get("dataframe_query_max_scanned_features", 50_000)
+            ),
+            batch_size=int(chat_config.get("dataframe_query_batch_size", 1_000)),
         ),
         search_limit=int(chat_config.get("tool_search_limit", 10)),
         semantic_max_distance=float(chat_config.get("semantic_max_distance", 0.8)),

@@ -74,6 +74,7 @@ def test_capabilities_disable_chat_when_llm_is_disabled(tmp_path: Path) -> None:
             "server_history": False,
             "semantic_search": False,
             "viewport_summary": False,
+            "viewport_dataframe_query": False,
             "style_generation": False,
             "feature_highlight": False,
             "text_labels": False,
