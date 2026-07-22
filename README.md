@@ -49,6 +49,7 @@ CLI commands log progress to the console at `INFO` level by default. Use
 .venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads
 .venv/bin/python src/ucrstar/cli.py add-dataset https://example.com/data/roads.geojson --name roads
 .venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads --create-only
+.venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads --schema-doc roads.metadata.json
 .venv/bin/python src/ucrstar/cli.py add-dataset https://egis-lacounty.hub.arcgis.com/search --create-only
 .venv/bin/python src/ucrstar/cli.py add-datasets https://www.ezesri.com/catalog.json --create-only
 ```
@@ -73,6 +74,24 @@ format. Source descriptions, attribute aliases, citations, and useful source
 metadata are copied into the catalog where possible. Large downloadable Esri
 items can take several minutes because they must be downloaded before Starlet
 starts its own tiling step.
+
+For local files, you can provide catalog text directly. Use `--description` for
+a short dataset description, or `--schema-doc` for a JSON metadata file with a
+dataset description and attribute explanations:
+
+```json
+{
+  "description": "Road centerlines maintained by the city.",
+  "attributes": [
+    {"name": "ROAD_NAME", "description": "Official street name."},
+    {"name": "LANES", "type": "integer", "description": "Number of through lanes."}
+  ]
+}
+```
+
+These values are stored with the source metadata, merged into the Starlet
+summary, saved in the catalog schema, and used later by search and the chat
+assistant. `--description` overrides the description from `--schema-doc`.
 
 When `add-dataset` points to an Esri Hub repository URL such as
 `https://egis-lacounty.hub.arcgis.com/search`, it scans the repository and

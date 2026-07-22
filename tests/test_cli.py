@@ -1,3 +1,4 @@
+import json
 import logging
 import tempfile
 from pathlib import Path
@@ -183,6 +184,98 @@ def test_add_dataset_remembers_starlet_config_zoom(
     dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
     assert dataset["metadata_json"]["max_zoom"] == 19
     assert dataset["visualization"]["max_zoom"] == 19
+
+
+def test_add_dataset_saves_local_schema_doc_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    input_path = tmp_path / "source.geojson"
+    schema_doc = tmp_path / "schema-doc.json"
+    input_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    schema_doc.write_text(
+        json.dumps(
+            {
+                "description": "Road centerlines maintained by the city.",
+                "attributes": [
+                    {
+                        "name": "ROAD_NAME",
+                        "description": "Official street name.",
+                    },
+                    {
+                        "name": "LANES",
+                        "type": "integer",
+                        "description": "Number of through lanes.",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        (datasets_dir / kwargs["name"]).mkdir(parents=True)
+        return None, None, None
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(cli.starlet, "get_config", lambda: {"mvt": {"zoom": 10}})
+    monkeypatch.setattr(cli.starlet, "list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 1024,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    def fake_get_dataset_summary(dataset):
+        summary_path = Path(dataset) / "summary.json"
+        if summary_path.exists():
+            return json.loads(summary_path.read_text(encoding="utf-8"))
+        return {
+            "description": None,
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [
+                {"name": "ROAD_NAME", "type": "string", "description": None},
+                {"name": "LANES", "type": None, "description": None},
+            ],
+        }
+
+    monkeypatch.setattr(cli.starlet, "get_dataset_summary", fake_get_dataset_summary)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            str(input_path),
+            "--name",
+            "roads",
+            "--schema-doc",
+            str(schema_doc),
+        ],
+    )
+
+    cli.main()
+
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    schema = {field["name"]: field for field in dataset["schema"]}
+    assert dataset["description"] == "Road centerlines maintained by the city."
+    assert dataset["source"]["metadata"]["description"] == "Road centerlines maintained by the city."
+    assert schema["ROAD_NAME"]["description"] == "Official street name."
+    assert schema["LANES"]["type"] == "integer"
+    assert schema["LANES"]["description"] == "Number of through lanes."
 
 
 def test_add_dataset_create_only_registers_source_without_building(

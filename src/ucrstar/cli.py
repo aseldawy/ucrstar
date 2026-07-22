@@ -69,6 +69,18 @@ def main() -> None:
     )
     add_dataset.add_argument("input_path")
     add_dataset.add_argument("--name")
+    add_dataset.add_argument(
+        "--description",
+        help="Dataset description to store with the source and catalog entry.",
+    )
+    add_dataset.add_argument(
+        "--schema-doc",
+        type=Path,
+        help=(
+            "JSON file with source metadata, for example "
+            '{"description":"...","attributes":[{"name":"field","description":"..."}]}.'
+        ),
+    )
     add_dataset.add_argument("--overwrite", action="store_true")
     add_dataset.add_argument(
         "--create-only",
@@ -196,7 +208,8 @@ def main() -> None:
             )
             LOGGER.info("Added %d dataset(s).", len(added) if isinstance(added, list) else 1)
             return
-        source = registration_source(args.input_path)
+        source_metadata = source_metadata_from_args(args)
+        source = apply_source_metadata(registration_source(args.input_path), source_metadata)
         existing = find_dataset_by_source(catalog, source)
         if existing is None:
             candidate_name = args.name or dataset_name_from_source(source, source_name_path(args.input_path, source))
@@ -213,6 +226,7 @@ def main() -> None:
             args.create_only,
             build_kwargs_from_args(args),
             project_config,
+            source_metadata,
         )
         if isinstance(added, list):
             LOGGER.info("Added %d dataset(s).", len(added))
@@ -321,6 +335,95 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--pmtiles", action="store_true", default=None)
 
 
+def source_metadata_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    metadata: dict[str, Any] = {}
+    if getattr(args, "schema_doc", None):
+        metadata.update(load_schema_doc(args.schema_doc))
+    if getattr(args, "description", None):
+        metadata["description"] = clean_text(args.description)
+    return metadata or None
+
+
+def load_schema_doc(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except OSError as exc:
+        raise SystemExit(f"Could not read schema doc {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Schema doc {path} is not valid JSON: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise SystemExit("Schema doc must be a JSON object.")
+
+    metadata: dict[str, Any] = {}
+    description = clean_text(payload.get("description"))
+    if description:
+        metadata["description"] = description
+
+    attributes = payload.get("attributes")
+    if attributes is not None:
+        if not isinstance(attributes, list):
+            raise SystemExit("Schema doc 'attributes' must be a list.")
+        normalized_attributes = []
+        for index, attribute in enumerate(attributes, start=1):
+            if not isinstance(attribute, dict):
+                raise SystemExit(f"Schema doc attribute #{index} must be an object.")
+            name = str(attribute.get("name") or "").strip()
+            if not name:
+                raise SystemExit(f"Schema doc attribute #{index} is missing 'name'.")
+            normalized: dict[str, Any] = {"name": name}
+            attr_type = attribute.get("type")
+            if attr_type:
+                normalized["type"] = str(attr_type)
+            attr_description = clean_text(attribute.get("description"))
+            if attr_description:
+                normalized["description"] = attr_description
+            normalized_attributes.append(normalized)
+        metadata["attributes"] = normalized_attributes
+
+    return metadata
+
+
+def apply_source_metadata(
+    source: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not metadata:
+        return source
+    updated = dict(source)
+    existing_metadata = dict(updated.get("metadata") or {})
+    merged = {**existing_metadata, **metadata}
+    if existing_metadata.get("attributes") and metadata.get("attributes"):
+        merged["attributes"] = merge_source_attributes(
+            existing_metadata["attributes"],
+            metadata["attributes"],
+        )
+    updated["metadata"] = merged
+    return updated
+
+
+def merge_source_attributes(
+    existing_attributes: Any,
+    new_attributes: Any,
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for attributes in (existing_attributes, new_attributes):
+        for attribute in attributes if isinstance(attributes, list) else []:
+            if not isinstance(attribute, dict):
+                continue
+            name = str(attribute.get("name") or "").strip()
+            if not name:
+                continue
+            if name not in merged:
+                merged[name] = {"name": name}
+                order.append(name)
+            merged[name].update(attribute)
+            merged[name]["name"] = name
+    return [merged[name] for name in order]
+
+
 def add_refresh_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "dataset",
@@ -356,6 +459,7 @@ def add_dataset_from_source(
     create_only: bool,
     build_kwargs: dict[str, Any],
     project_config: dict[str, Any],
+    source_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     if is_ezesri_catalog_url(input_path_or_url):
         if dataset_name:
@@ -384,7 +488,7 @@ def add_dataset_from_source(
         )
 
     if create_only:
-        source = registration_source(input_path_or_url)
+        source = apply_source_metadata(registration_source(input_path_or_url), source_metadata)
         existing = find_dataset_by_source(catalog, source)
         if existing is not None:
             log_existing_dataset_skip(input_path_or_url, existing)
@@ -403,7 +507,7 @@ def add_dataset_from_source(
         LOGGER.info("Registered dataset '%s' in created state", dataset["name"])
         return dataset
 
-    source = registration_source(input_path_or_url)
+    source = apply_source_metadata(registration_source(input_path_or_url), source_metadata)
     existing = find_dataset_by_source(catalog, source)
     if existing is not None:
         log_existing_dataset_skip(input_path_or_url, existing)
@@ -1305,7 +1409,28 @@ def prepare_dataset_source(dataset_dir: Path, source_url: str, source: dict[str,
             if current_modified is None or cached_modified >= current_modified:
                 LOGGER.info("Using cached source copy for %s", source_url)
                 return SimplePreparedSource(path=cached_path, source=current)
-    return prepare_input_source(source_url)
+    prepared = prepare_input_source(source_url)
+    prepared.source = merge_prepared_source_metadata(prepared.source, source)
+    return prepared
+
+
+def merge_prepared_source_metadata(
+    prepared_source: dict[str, Any],
+    stored_source: dict[str, Any],
+) -> dict[str, Any]:
+    stored_metadata = stored_source.get("metadata") or {}
+    if not stored_metadata:
+        return prepared_source
+    updated = dict(prepared_source)
+    prepared_metadata = dict(updated.get("metadata") or {})
+    merged_metadata = {**stored_metadata, **prepared_metadata}
+    if stored_metadata.get("attributes") and prepared_metadata.get("attributes"):
+        merged_metadata["attributes"] = merge_source_attributes(
+            prepared_metadata["attributes"],
+            stored_metadata["attributes"],
+        )
+    updated["metadata"] = merged_metadata
+    return updated
 
 
 def cached_download_path(dataset_dir: Path, source: dict[str, Any]) -> Path | None:
@@ -1580,8 +1705,10 @@ def write_source_summary(dataset_dir: Path, source: dict[str, Any]) -> None:
         updated = dict(attr)
         source_attr = source_attributes.get(updated.get("name"))
         if source_attr:
-            updated.setdefault("type", source_attr.get("type"))
-            updated.setdefault("description", source_attr.get("description"))
+            if source_attr.get("type") and not updated.get("type"):
+                updated["type"] = source_attr.get("type")
+            if source_attr.get("description") and not updated.get("description"):
+                updated["description"] = source_attr.get("description")
         attributes.append(updated)
     summary["attributes"] = attributes
 
