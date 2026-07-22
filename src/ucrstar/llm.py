@@ -260,11 +260,25 @@ class GeminiClient(LLMClient):
             for message in messages
             if message.get("role") in {"user", "assistant"}
         ]
-        body: dict[str, Any] = {"contents": contents}
+        body: dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": float(self.settings.provider_config.get("temperature", 0.2)),
+                "maxOutputTokens": int(
+                    self.settings.provider_config.get("chat_max_tokens", 8192)
+                ),
+            },
+        }
         if system_parts:
             body["systemInstruction"] = {"parts": system_parts}
         data = self._post(f"/models/{self.chat_model}:generateContent", body)
-        return str(data["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
+        parts = data["candidates"][0]["content"].get("parts") or []
+        return "".join(
+            str(part.get("text") or "")
+            for part in parts
+            if isinstance(part, dict)
+        ).strip()
 
     def complete_json(self, prompt: str) -> dict[str, Any]:
         LOGGER.info("Calling Gemini chat model %s", self.chat_model)

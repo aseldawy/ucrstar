@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import urllib.parse
 import urllib.request
 from collections import Counter
@@ -12,6 +13,7 @@ from typing import Any
 
 import starlet
 
+from .assistant_style import build_assistant_style, style_attributes
 from .catalog import DatasetCatalog
 from .llm import ssl_context
 
@@ -31,6 +33,44 @@ Available tools (request them only through tool_calls):
 - change_basemap: {"basemap": "street"|"satellite"}.
 - summarize_viewport: {}. Query and summarize the selected dataset inside the current
   viewport. Use this before describing visible features, values, patterns, or anomalies.
+- find_attributes: {"query": string, "dataset_id"?: string}. Search the complete schema
+  of the selected dataset by field name and description. Use this before claiming that an
+  attribute is absent, especially when dataset.schema_truncated is true, and when the user
+  asks for the closest field to a phrase.
+- apply_style: {"style": MapLibreStyleV8, "dataset_id"?: string}. Create a complete
+  dataset style or modify the current style. Preserve current layers and properties that
+  the user did not ask to change. The server binds the dataset source, so use source
+  "dataset" and never add external sources, sprites, glyph URLs, or icon images. You may
+  use expressions, filters, zoom-dependent paint/layout, heatmaps, and fill extrusions.
+  Do not add symbol layers, text-field, or icon-image here. Use set_labels for text and
+  set_point_icons for Unicode symbols instead. Reference only attributes present in
+  dataset.schema, plus numeric "_id".
+  Use MapLibre expression syntax: substring or array membership is ["in", needle,
+  haystack], never an "includes" operator. Use ["geometry-type"] in filters rather than
+  the legacy "$type" property. For case-insensitive text matching, combine "downcase",
+  "to-string", and "in".
+  For vector polygon or line datasets, include a circle layer for Point geometry because
+  small features can be encoded as points at low zoom. Vector tiles may also be sampled;
+  never claim that a style can reveal omitted features without zooming in.
+- reset_style: {}. Restore the selected dataset's server-provided style.
+- highlight_feature: {"feature_id"?: integer, "color"?: "#RRGGBB"}. Highlight a
+  feature across tile boundaries using its numeric _id. Omit feature_id only when
+  selected_feature_id is present in context.
+- clear_highlight: {}. Remove the current feature highlight.
+- set_labels: {"attribute": string, "dataset_id"?: string, "size"?: number,
+  "color"?: "#RRGGBB", "background"?: "none"|"light"|"dark",
+  "min_zoom"?: number, "max_zoom"?: number, "allow_overlap"?: boolean}.
+  Draw the attribute as a centered label for each visible point, line, or polygon. This
+  renderer does not require MapLibre glyphs. Use a real schema field (or numeric "_id").
+- clear_labels: {"dataset_id"?: string}. Remove assistant-configured labels.
+- set_point_icons: {"attribute"?: string, "icons"?: {"attribute value":"emoji"},
+  "default_icon"?: "emoji", "dataset_id"?: string, "size"?: number,
+  "min_zoom"?: number, "max_zoom"?: number, "allow_overlap"?: boolean}.
+  Draw Unicode symbols on visible Point features. For category-specific icons, supply an
+  exact-value mapping and normally a default_icon. To use one icon for all points, omit
+  attribute and icons and provide default_icon. Use this for point datasets such as POIs
+  or crimes; do not create MapLibre icon-image layers.
+- clear_point_icons: {"dataset_id"?: string}. Remove assistant-configured point icons.
 
 Return only JSON with this shape:
 {"message":"brief response","tool_calls":[{"name":"tool","arguments":{}}]}.
@@ -257,6 +297,72 @@ def finalize_statistics(
     return result
 
 
+def attribute_search_results(
+    dataset: dict[str, Any],
+    query: str,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Rank fields from the complete schema and include their available statistics."""
+    query_text = normalize_attribute_text(query)
+    query_tokens = {token for token in query_text.split() if len(token) >= 3}
+    summary_by_name = {
+        str(item.get("name")): item
+        for item in ((dataset.get("summary_json") or {}).get("attributes") or [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    ranked: list[tuple[float, int, dict[str, Any]]] = []
+    for index, field in enumerate(dataset.get("schema") or []):
+        if not isinstance(field, dict) or not field.get("name"):
+            continue
+        name_text = normalize_attribute_text(str(field["name"]))
+        description_text = normalize_attribute_text(str(field.get("description") or ""))
+        searchable = f"{name_text} {description_text}".strip()
+        field_tokens = set(searchable.split())
+        overlap = len(query_tokens & field_tokens)
+        score = float(overlap * 12)
+        if name_text == query_text:
+            score += 200
+        elif query_text and query_text in name_text:
+            score += 120
+        elif len(name_text.replace(" ", "")) >= 4 and name_text in query_text:
+            score += 90
+        if query_tokens and query_tokens <= set(name_text.split()):
+            score += 80
+        if overlap == 0 and query_text not in name_text and name_text not in query_text:
+            continue
+
+        detail = compact_attribute(field, summary_by_name.get(str(field["name"])))
+        ranked.append((score, -index, detail))
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [detail for _, _, detail in ranked[: max(1, min(limit, 50))]]
+
+
+def normalize_attribute_text(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", value.lower()))
+
+
+def compact_attribute(
+    field: dict[str, Any],
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = {
+        key: field[key]
+        for key in ("name", "type", "role", "description", "min", "max", "top_k")
+        if key in field
+    }
+    summary = summary or {}
+    for key in ("min", "max", "approx_distinct", "non_null_count", "null_count"):
+        if key not in result and key in summary:
+            result[key] = summary[key]
+    if "top_k" not in result and isinstance(summary.get("top_k"), list):
+        result["top_k"] = summary["top_k"][:20]
+    elif isinstance(result.get("top_k"), list):
+        result["top_k"] = result["top_k"][:20]
+    return result
+
+
 @dataclass
 class AssistantTools:
     catalog: DatasetCatalog
@@ -264,6 +370,9 @@ class AssistantTools:
     viewport_summarizer: ViewportSummarizer
     search_limit: int = 10
     semantic_max_distance: float = 0.8
+    style_max_chars: int = 40_000
+    style_max_layers: int = 40
+    style_max_nodes: int = 5_000
 
     def execute(
         self,
@@ -292,6 +401,24 @@ class AssistantTools:
                 result, actions = self.change_basemap(arguments)
             elif name == "summarize_viewport":
                 result, actions = self.summarize_viewport(context)
+            elif name == "find_attributes":
+                result, actions = self.find_attributes(arguments, context)
+            elif name == "apply_style":
+                result, actions = self.apply_style(arguments, context)
+            elif name == "reset_style":
+                result, actions = self.reset_style(context)
+            elif name == "highlight_feature":
+                result, actions = self.highlight_feature(arguments, context)
+            elif name == "clear_highlight":
+                result, actions = self.clear_highlight(context)
+            elif name == "set_labels":
+                result, actions = self.set_labels(arguments, context)
+            elif name == "clear_labels":
+                result, actions = self.clear_labels(arguments, context)
+            elif name == "set_point_icons":
+                result, actions = self.set_point_icons(arguments, context)
+            elif name == "clear_point_icons":
+                result, actions = self.clear_point_icons(arguments, context)
             else:
                 return tool_error(name, arguments, "Unsupported tool")
             validated_actions = [validate_action(action) for action in actions]
@@ -417,6 +544,167 @@ class AssistantTools:
             raise ValueError("The current viewport is unavailable")
         return self.viewport_summarizer.summarize(dataset_id, bounds), []
 
+    def find_attributes(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        query = required_text(arguments, "query", max_chars=500)
+        dataset = self.context_dataset(arguments, context)
+        matches = attribute_search_results(dataset, query, limit=20)
+        return (
+            {
+                "dataset_id": dataset["id"],
+                "dataset_name": dataset["name"],
+                "query": query,
+                "schema_field_count": len(dataset.get("schema") or []),
+                "matches": matches,
+            },
+            [],
+        )
+
+    def apply_style(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset(arguments, context)
+        style = build_assistant_style(
+            arguments.get("style"),
+            dataset,
+            max_chars=self.style_max_chars,
+            max_layers=self.style_max_layers,
+            max_nodes=self.style_max_nodes,
+        )
+        attributes = sorted(style_attributes(style))
+        result = {
+            "dataset_id": dataset["id"],
+            "style_name": style.get("name"),
+            "layer_count": len(style["layers"]),
+            "attributes": attributes,
+            "point_fallback": bool(
+                ((style.get("metadata") or {}).get("ucrstar:assistant") or {}).get(
+                    "point_fallback"
+                )
+            ),
+            "sampling_note": (
+                ((style.get("metadata") or {}).get("ucrstar:assistant") or {}).get(
+                    "sampling_note"
+                )
+            ),
+        }
+        return result, [
+            {
+                "type": "apply_style",
+                "dataset_id": dataset["id"],
+                "style": style,
+            }
+        ]
+
+    def reset_style(
+        self,
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset({}, context)
+        result = {"dataset_id": dataset["id"]}
+        return result, [{"type": "reset_style", **result}]
+
+    def highlight_feature(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset(arguments, context)
+        if (dataset.get("visualization") or {}).get("type") != "VectorTile":
+            raise ValueError("_id highlighting is available only for vector-tile datasets")
+        feature_id = arguments.get("feature_id", context.get("selected_feature_id"))
+        if (
+            not isinstance(feature_id, int)
+            or isinstance(feature_id, bool)
+            or not -(2**53 - 1) <= feature_id <= 2**53 - 1
+        ):
+            raise ValueError("feature_id must be a JavaScript-safe integer")
+        color = arguments.get("color", "#ffd54f")
+        if not isinstance(color, str) or not is_hex_color(color):
+            raise ValueError("highlight color must be a hexadecimal color")
+        result = {
+            "dataset_id": dataset["id"],
+            "feature_id": feature_id,
+            "color": color,
+        }
+        return result, [{"type": "highlight_feature", **result}]
+
+    def clear_highlight(
+        self,
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset({}, context)
+        result = {"dataset_id": dataset["id"]}
+        return result, [{"type": "clear_highlight", **result}]
+
+    def set_labels(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset(arguments, context)
+        attribute = required_text(arguments, "attribute", max_chars=256)
+        require_dataset_attribute(dataset, attribute)
+        action = label_action(arguments, dataset["id"], attribute)
+        return dict(action), [action]
+
+    def clear_labels(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset(arguments, context)
+        result = {"dataset_id": dataset["id"]}
+        return result, [{"type": "clear_labels", **result}]
+
+    def set_point_icons(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset(arguments, context)
+        geometry_types = " ".join(
+            str(value).lower() for value in (dataset.get("geometry_types") or [])
+        )
+        if "point" not in geometry_types:
+            raise ValueError("Unicode icons are available only for point datasets")
+
+        attribute = arguments.get("attribute")
+        if attribute is not None:
+            if not isinstance(attribute, str) or not attribute.strip():
+                raise ValueError("attribute must be a non-empty string")
+            attribute = attribute.strip()
+            require_dataset_attribute(dataset, attribute)
+        action = point_icon_action(arguments, dataset["id"], attribute)
+        return dict(action), [action]
+
+    def clear_point_icons(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset(arguments, context)
+        result = {"dataset_id": dataset["id"]}
+        return result, [{"type": "clear_point_icons", **result}]
+
+    def context_dataset(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        dataset_id = arguments.get("dataset_id", context.get("dataset_id"))
+        if not isinstance(dataset_id, str) or not dataset_id:
+            raise ValueError("No dataset is selected")
+        dataset = self.catalog.get(dataset_id)
+        if dataset is None or dataset.get("dataset_state") != "published":
+            raise ValueError("The selected dataset is not available")
+        return dataset
+
 
 def tool_error(name: str, arguments: dict[str, Any], message: str) -> ToolOutcome:
     return ToolOutcome(
@@ -499,6 +787,128 @@ def public_dataset_result(dataset: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def require_dataset_attribute(dataset: dict[str, Any], attribute: str) -> None:
+    if attribute == "_id":
+        return
+    names = {
+        str(field.get("name"))
+        for field in (dataset.get("schema") or [])
+        if isinstance(field, dict) and field.get("name")
+    }
+    if attribute not in names:
+        raise ValueError(f'Attribute "{attribute}" is not present in the dataset schema')
+
+
+def bounded_number(
+    value: Any,
+    name: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    if (
+        not isinstance(value, int | float)
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or not minimum <= float(value) <= maximum
+    ):
+        raise ValueError(f"{name} must be between {minimum:g} and {maximum:g}")
+    return float(value)
+
+
+def zoom_range(arguments: dict[str, Any]) -> tuple[float, float]:
+    min_zoom = bounded_number(
+        arguments.get("min_zoom", 0), "min_zoom", minimum=0, maximum=24
+    )
+    max_zoom = bounded_number(
+        arguments.get("max_zoom", 24), "max_zoom", minimum=0, maximum=24
+    )
+    if min_zoom >= max_zoom:
+        raise ValueError("min_zoom must be less than max_zoom")
+    return min_zoom, max_zoom
+
+
+def boolean_option(arguments: dict[str, Any], name: str, default: bool) -> bool:
+    value = arguments.get(name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
+def label_action(
+    arguments: dict[str, Any],
+    dataset_id: str,
+    attribute: str,
+) -> dict[str, Any]:
+    size = bounded_number(arguments.get("size", 14), "size", minimum=8, maximum=64)
+    color = arguments.get("color", "#202124")
+    if not isinstance(color, str) or not is_hex_color(color):
+        raise ValueError("color must be a hexadecimal color")
+    background = arguments.get("background", "light")
+    if background not in {"none", "light", "dark"}:
+        raise ValueError("background must be none, light, or dark")
+    min_zoom, max_zoom = zoom_range(arguments)
+    return {
+        "type": "set_labels",
+        "dataset_id": dataset_id,
+        "attribute": attribute,
+        "size": size,
+        "color": color,
+        "background": background,
+        "min_zoom": min_zoom,
+        "max_zoom": max_zoom,
+        "allow_overlap": boolean_option(arguments, "allow_overlap", False),
+        "placement": "center",
+    }
+
+
+def unicode_symbol(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty Unicode symbol")
+    value = value.strip()
+    if len(value) > 16 or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{name} must be at most 16 characters without control characters")
+    return value
+
+
+def point_icon_action(
+    arguments: dict[str, Any],
+    dataset_id: str,
+    attribute: str | None,
+) -> dict[str, Any]:
+    icons = arguments.get("icons", {})
+    if not isinstance(icons, dict) or len(icons) > 100:
+        raise ValueError("icons must be an object with at most 100 entries")
+    normalized_icons: dict[str, str] = {}
+    for raw_value, raw_icon in icons.items():
+        if not isinstance(raw_value, str) or not raw_value or len(raw_value) > 256:
+            raise ValueError("icon mapping keys must be non-empty strings of at most 256 characters")
+        normalized_icons[raw_value] = unicode_symbol(
+            raw_icon, f'icon for "{raw_value}"'
+        ) or ""
+    default_icon = unicode_symbol(arguments.get("default_icon"), "default_icon")
+    if attribute is None and normalized_icons:
+        raise ValueError("attribute is required when icons contains category mappings")
+    if not normalized_icons and default_icon is None:
+        raise ValueError("icons or default_icon is required")
+    min_zoom, max_zoom = zoom_range(arguments)
+    return {
+        "type": "set_point_icons",
+        "dataset_id": dataset_id,
+        "attribute": attribute,
+        "icons": normalized_icons,
+        "default_icon": default_icon,
+        "size": bounded_number(
+            arguments.get("size", 24), "size", minimum=8, maximum=64
+        ),
+        "min_zoom": min_zoom,
+        "max_zoom": max_zoom,
+        "allow_overlap": boolean_option(arguments, "allow_overlap", False),
+    }
+
+
 def validate_action(action: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(action, dict):
         raise ValueError("Action must be an object")
@@ -529,6 +939,77 @@ def validate_action(action: dict[str, Any]) -> dict[str, Any]:
         if action.get("basemap") not in {"street", "satellite"}:
             raise ValueError("Invalid change_basemap action")
         return {"type": action_type, "basemap": action["basemap"]}
+    if action_type == "apply_style":
+        dataset_id = action.get("dataset_id")
+        style = action.get("style")
+        if (
+            not isinstance(dataset_id, str)
+            or not dataset_id
+            or not isinstance(style, dict)
+            or style.get("version") != 8
+            or not isinstance(style.get("layers"), list)
+        ):
+            raise ValueError("Invalid apply_style action")
+        return {"type": action_type, "dataset_id": dataset_id, "style": style}
+    if action_type == "reset_style":
+        dataset_id = action.get("dataset_id")
+        if not isinstance(dataset_id, str) or not dataset_id:
+            raise ValueError("Invalid reset_style action")
+        return {"type": action_type, "dataset_id": dataset_id}
+    if action_type == "highlight_feature":
+        dataset_id = action.get("dataset_id")
+        feature_id = action.get("feature_id")
+        color = action.get("color")
+        if (
+            not isinstance(dataset_id, str)
+            or not dataset_id
+            or not isinstance(feature_id, int)
+            or isinstance(feature_id, bool)
+            or not -(2**53 - 1) <= feature_id <= 2**53 - 1
+            or not isinstance(color, str)
+            or not is_hex_color(color)
+        ):
+            raise ValueError("Invalid highlight_feature action")
+        return {
+            "type": action_type,
+            "dataset_id": dataset_id,
+            "feature_id": feature_id,
+            "color": color,
+        }
+    if action_type == "clear_highlight":
+        dataset_id = action.get("dataset_id")
+        if not isinstance(dataset_id, str) or not dataset_id:
+            raise ValueError("Invalid clear_highlight action")
+        return {"type": action_type, "dataset_id": dataset_id}
+    if action_type == "set_labels":
+        dataset_id = action.get("dataset_id")
+        attribute = action.get("attribute")
+        if (
+            not isinstance(dataset_id, str)
+            or not dataset_id
+            or not isinstance(attribute, str)
+            or not attribute
+        ):
+            raise ValueError("Invalid set_labels action")
+        return label_action(action, dataset_id, attribute)
+    if action_type == "clear_labels":
+        dataset_id = action.get("dataset_id")
+        if not isinstance(dataset_id, str) or not dataset_id:
+            raise ValueError("Invalid clear_labels action")
+        return {"type": action_type, "dataset_id": dataset_id}
+    if action_type == "set_point_icons":
+        dataset_id = action.get("dataset_id")
+        attribute = action.get("attribute")
+        if not isinstance(dataset_id, str) or not dataset_id:
+            raise ValueError("Invalid set_point_icons action")
+        if attribute is not None and (not isinstance(attribute, str) or not attribute):
+            raise ValueError("Invalid set_point_icons attribute")
+        return point_icon_action(action, dataset_id, attribute)
+    if action_type == "clear_point_icons":
+        dataset_id = action.get("dataset_id")
+        if not isinstance(dataset_id, str) or not dataset_id:
+            raise ValueError("Invalid clear_point_icons action")
+        return {"type": action_type, "dataset_id": dataset_id}
     raise ValueError("Unsupported action")
 
 
@@ -553,3 +1034,13 @@ def required_text(arguments: dict[str, Any], key: str, *, max_chars: int) -> str
     if len(value) > max_chars:
         raise ValueError(f"{key} must be at most {max_chars} characters")
     return value
+
+
+def is_hex_color(value: str) -> bool:
+    if not value.startswith("#") or len(value) not in {4, 7}:
+        return False
+    try:
+        int(value[1:], 16)
+    except ValueError:
+        return False
+    return True

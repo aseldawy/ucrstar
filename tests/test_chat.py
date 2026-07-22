@@ -75,12 +75,23 @@ def test_capabilities_disable_chat_when_llm_is_disabled(tmp_path: Path) -> None:
             "semantic_search": False,
             "viewport_summary": False,
             "style_generation": False,
+            "feature_highlight": False,
+            "text_labels": False,
+            "unicode_point_icons": False,
         },
         "action_types": [
             "show_datasets",
             "select_dataset",
             "fit_bounds",
             "change_basemap",
+            "apply_style",
+            "reset_style",
+            "highlight_feature",
+            "clear_highlight",
+            "set_labels",
+            "clear_labels",
+            "set_point_icons",
+            "clear_point_icons",
         ],
     }
 

@@ -248,7 +248,11 @@ def test_gemini_chat_maps_assistant_role_and_system_instruction(monkeypatch) -> 
     def fake_post(path, body):
         calls["path"] = path
         calls["body"] = body
-        return {"candidates": [{"content": {"parts": [{"text": "Gemini response"}]}}]}
+        return {
+            "candidates": [
+                {"content": {"parts": [{"text": "Gemini "}, {"text": "response"}]}}
+            ]
+        }
 
     monkeypatch.setattr(client, "_post", fake_post)
 
@@ -265,6 +269,11 @@ def test_gemini_chat_maps_assistant_role_and_system_instruction(monkeypatch) -> 
     assert calls["path"] == "/models/test-chat:generateContent"
     assert calls["body"]["systemInstruction"] == {"parts": [{"text": "Be helpful"}]}
     assert [item["role"] for item in calls["body"]["contents"]] == ["user", "model", "user"]
+    assert calls["body"]["generationConfig"] == {
+        "responseMimeType": "application/json",
+        "temperature": 0.2,
+        "maxOutputTokens": 8192,
+    }
 
 
 def test_ollama_chat_uses_server_configured_model(monkeypatch) -> None:

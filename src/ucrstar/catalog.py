@@ -24,6 +24,14 @@ GEOJSON_MAX_BYTES = 1_000_000
 STYLE_SOURCE_ID = "dataset"
 VECTOR_SOURCE_LAYER = "layer0"
 CATEGORICAL_MIN_COVERAGE = 0.8
+DATASET_STYLE_LAYER_TYPES = {
+    "fill",
+    "line",
+    "circle",
+    "symbol",
+    "heatmap",
+    "fill-extrusion",
+}
 CATEGORICAL_COLORS = [
     "#4477aa",
     "#ee6677",
@@ -1094,6 +1102,8 @@ def normalize_style(
     style: Any,
     geometry_types: list[str] | None,
     dataset: dict[str, Any] | None = None,
+    *,
+    enforce_inferred_category_safety: bool = True,
 ) -> dict[str, Any]:
     """Return a complete, dataset-bound MapLibre Style Specification document."""
     dataset = dataset or {}
@@ -1117,20 +1127,21 @@ def normalize_style(
             normalize_maplibre_layer(layer, visualization)
             for layer in layers
             if isinstance(layer, dict)
-            and layer.get("type") in {"fill", "line", "circle", "symbol"}
+            and layer.get("type") in DATASET_STYLE_LAYER_TYPES
         ]
         normalized_layers = [layer for layer in normalized_layers if layer]
     else:
         normalized_layers = default_maplibre_layers(paints, visualization)
 
     metadata = dict(style.get("metadata") or {}) if isinstance(style, dict) else {}
-    repair_cosmetic_categorical_style(normalized_layers, metadata, dataset)
-    reject_low_coverage_categorical_styles(
-        normalized_layers,
-        metadata,
-        dataset,
-        paints,
-    )
+    if enforce_inferred_category_safety:
+        repair_cosmetic_categorical_style(normalized_layers, metadata, dataset)
+        reject_low_coverage_categorical_styles(
+            normalized_layers,
+            metadata,
+            dataset,
+            paints,
+        )
     return {
         "version": 8,
         "name": str(style.get("name") or dataset.get("name") or "UCR Star dataset")
@@ -1433,10 +1444,8 @@ def normalize_maplibre_layer(
     for key in ("minzoom", "maxzoom", "filter", "layout"):
         if key in layer:
             normalized[key] = layer[key]
-    if layer_type in {"fill", "line", "circle"}:
+    if layer_type in DATASET_STYLE_LAYER_TYPES:
         normalized["paint"] = normalize_layer_paint(layer.get("paint"), layer_type)
-    elif isinstance(layer.get("paint"), dict):
-        normalized["paint"] = layer["paint"]
     return normalized
 
 
@@ -1501,9 +1510,14 @@ def normalize_layer_paint(layer_style: Any, layer_type: str) -> dict[str, Any]:
 
 def is_supported_paint_property(key: Any, value: Any, layer_type: str) -> bool:
     """Return whether a generated paint property is safe to keep."""
+    prefixes = (
+        ("text-", "icon-")
+        if layer_type == "symbol"
+        else (f"{layer_type}-",)
+    )
     return (
         isinstance(key, str)
-        and key.startswith(f"{layer_type}-")
+        and key.startswith(prefixes)
         and isinstance(value, str | int | float | bool | list | dict)
     )
 

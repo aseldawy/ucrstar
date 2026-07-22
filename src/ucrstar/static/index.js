@@ -31,6 +31,10 @@ var basemapMode = 'street';
 var currentDatasetBounds = null;
 var currentTileAttributesKey = '';
 var currentStyleColors = null;
+var activeDatasetLayerIds = [];
+var activeInteractiveLayerIds = [];
+var activeHighlightLayerIds = [];
+var currentHighlight = null;
 
 var searchForm = document.getElementById('searchForm');
 var searchInput = document.getElementById('searchInput');
@@ -212,12 +216,18 @@ function renderSearchResults(datasets) {
 
 async function selectDataset(datasetRef, options) {
   options = options || {};
+  var previousDataset = currentDataset;
   var mapEl = document.getElementById('map');
   mapEl.classList.add('dataset-switching');
   setTimeout(function(){ mapEl.classList.remove('dataset-switching'); }, 400);
 
   currentDatasetInfo = await fetchJson('/datasets/'+encodeURIComponent(datasetRef)+'.json');
   currentDataset = currentDatasetInfo.id || currentDatasetInfo.name;
+  if (previousDataset && String(previousDataset) !== String(currentDataset) && activePopup) {
+    activePopup.remove();
+    activePopup = null;
+    activePopupState = null;
+  }
   currentAttributes = buildAttributeCatalog(currentDatasetInfo);
   searchInput.value = currentDatasetInfo.name || '';
   updateSearchControls();
@@ -231,18 +241,18 @@ async function loadMapDataset(dataset, options) {
   options = options || {};
   clearDatasetLayer();
   resetLegend();
-  _detachLabelRenderer();
+  _resetOverlayRenderer();
   activeDatasetStyle = await fetchDatasetStyle(dataset);
   var visualization = dataset.visualization || {};
   sourceLayer = visualization.source_layer || SOURCE_LAYER;
-  currentTileAttributesKey = tileAttributesKey(tileAttributesForStyle(activeDatasetStyle.document));
-  addDatasetSourceAndLayers(visualization, activeDatasetStyle.layers);
+  currentTileAttributesKey = tileAttributesKey(tileAttributesForStyle(activeDatasetStyle.document, overlayAttributes()));
+  addDatasetSourceAndStyleLayers(visualization, activeDatasetStyle.document, activeDatasetStyle.layers);
 
   attachClickableCursors();
   populateAttributeSelect();
   populateLabelSelect();
   syncStylePanelFromDocument(activeDatasetStyle.document);
-  applyLabelsFromStylePanel();
+  syncDatasetLabelRenderer();
   renderStyleLegend(activeDatasetStyle.document);
 
   var geomText = ((dataset.geometry_types || []).join(' ') || '').toUpperCase();
@@ -277,10 +287,44 @@ function visualizationSource(visualization) {
 function addDatasetSourceAndLayers(visualization, paints) {
   map.addSource(DATASET_SOURCE, visualizationSource(visualization));
   var layerSource = visualization.type === 'VectorTile' ? {'source-layer':sourceLayer} : {};
-  addStyledLayer(Object.assign({id:'fill', type:'fill', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:clone(paints.fill)}, layerSource), FALLBACK_STYLE.layers.fill);
-  addStyledLayer(Object.assign({id:'outline', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:clone(paints.line)}, layerSource), FALLBACK_STYLE.layers.line);
-  addStyledLayer(Object.assign({id:'points', type:'circle', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Point'], paint:clone(paints.circle)}, layerSource), FALLBACK_STYLE.layers.circle);
-  addStyledLayer(Object.assign({id:'lines', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'LineString'], paint:clone(paints.line)}, layerSource), FALLBACK_STYLE.layers.line);
+  registerDatasetLayer(Object.assign({id:'fill', type:'fill', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:clone(paints.fill)}, layerSource), FALLBACK_STYLE.layers.fill);
+  registerDatasetLayer(Object.assign({id:'outline', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Polygon'], paint:clone(paints.line)}, layerSource), FALLBACK_STYLE.layers.line);
+  registerDatasetLayer(Object.assign({id:'points', type:'circle', source:DATASET_SOURCE, filter:['==',['geometry-type'],'Point'], paint:clone(paints.circle)}, layerSource), FALLBACK_STYLE.layers.circle);
+  registerDatasetLayer(Object.assign({id:'lines', type:'line', source:DATASET_SOURCE, filter:['==',['geometry-type'],'LineString'], paint:clone(paints.line)}, layerSource), FALLBACK_STYLE.layers.line);
+}
+
+function addDatasetSourceAndStyleLayers(visualization, style, fallbackPaints) {
+  map.addSource(DATASET_SOURCE, visualizationSource(visualization));
+  activeDatasetLayerIds = [];
+  activeInteractiveLayerIds = [];
+  var layers = style && Array.isArray(style.layers) ? style.layers : [];
+  layers.forEach(function(sourceLayerStyle){
+    var layer = clientDatasetLayer(sourceLayerStyle, visualization);
+    if (layer) registerDatasetLayer(layer, null);
+  });
+  if (!activeDatasetLayerIds.length) {
+    map.removeSource(DATASET_SOURCE);
+    addDatasetSourceAndLayers(visualization, fallbackPaints || FALLBACK_STYLE.layers);
+  }
+}
+
+function clientDatasetLayer(sourceLayerStyle, visualization) {
+  if (!sourceLayerStyle || typeof sourceLayerStyle.id !== 'string') return null;
+  if (['fill','line','circle','symbol','heatmap','fill-extrusion'].indexOf(sourceLayerStyle.type) === -1) return null;
+  var layer = clone(sourceLayerStyle);
+  layer.source = DATASET_SOURCE;
+  if (visualization.type === 'VectorTile') layer['source-layer'] = sourceLayer;
+  else delete layer['source-layer'];
+  return layer;
+}
+
+function registerDatasetLayer(layer, fallbackPaint) {
+  if (!addStyledLayer(layer, fallbackPaint)) return false;
+  activeDatasetLayerIds.push(layer.id);
+  if (['fill','line','circle','symbol'].indexOf(layer.type) !== -1) {
+    activeInteractiveLayerIds.push(layer.id);
+  }
+  return true;
 }
 
 function vectorTileUrl(url) {
@@ -297,9 +341,11 @@ function updateVectorTileAttributes(attributes) {
   var key = tileAttributesKey(attributes);
   if (key === currentTileAttributesKey) return;
   currentTileAttributesKey = key;
-  var paints = currentMapPaints();
-  clearDatasetLayer();
-  addDatasetSourceAndLayers(visualization, paints);
+  var style = clone(activeDatasetStyle.document);
+  var highlight = currentHighlight && clone(currentHighlight);
+  clearDatasetLayer({preserveHighlight:true});
+  addDatasetSourceAndStyleLayers(visualization, style, activeDatasetStyle.layers);
+  if (highlight) applyFeatureHighlight(highlight);
   attachClickableCursors();
   _scheduleRender();
 }
@@ -518,18 +564,31 @@ function isSupportedPaintProperty(key, value, layerType) {
 function addStyledLayer(layer, fallbackPaint) {
   try {
     map.addLayer(layer);
+    return true;
   } catch(e) {
     console.warn('Dataset style rejected for '+layer.id, e);
-    layer.paint = fallbackPaint;
-    map.addLayer(layer);
+    if (!fallbackPaint) return false;
+    try {
+      layer.paint = clone(fallbackPaint);
+      map.addLayer(layer);
+      return true;
+    } catch(fallbackError) {
+      console.warn('Fallback dataset style rejected for '+layer.id, fallbackError);
+      return false;
+    }
   }
 }
 
-function clearDatasetLayer() {
-  CLICKABLE_LAYERS.concat(['outline']).forEach(function(layerId){
+function clearDatasetLayer(options) {
+  options = options || {};
+  activeHighlightLayerIds.concat(activeDatasetLayerIds, CLICKABLE_LAYERS, ['outline']).forEach(function(layerId){
     if (map.getLayer(layerId)) map.removeLayer(layerId);
   });
   if (map.getSource(DATASET_SOURCE)) map.removeSource(DATASET_SOURCE);
+  activeDatasetLayerIds = [];
+  activeInteractiveLayerIds = [];
+  activeHighlightLayerIds = [];
+  if (!options.preserveHighlight) currentHighlight = null;
   map._cursorBound = {};
 }
 
@@ -560,7 +619,7 @@ function updateZoomAllState() {
 }
 
 function attachClickableCursors() {
-  CLICKABLE_LAYERS.forEach(function(layerId){
+  interactiveDatasetLayerIds().forEach(function(layerId){
     if (!map.getLayer(layerId) || map._cursorBound && map._cursorBound[layerId]) return;
     map._cursorBound = map._cursorBound || {};
     map._cursorBound[layerId] = true;
@@ -571,7 +630,7 @@ function attachClickableCursors() {
 
 async function handleMapClick(e) {
   if (!currentDatasetInfo) return;
-  var avail = CLICKABLE_LAYERS.filter(function(layerId){ return map.getLayer(layerId); });
+  var avail = interactiveDatasetLayerIds().filter(function(layerId){ return map.getLayer(layerId); });
   if (!avail.length) return;
   var features = map.queryRenderedFeatures(e.point, {layers:avail});
   if (!features || !features.length) return;
@@ -583,10 +642,14 @@ async function handleMapClick(e) {
     var response = await fetch(sampleJsonUrl);
     if (!response.ok) throw new Error(response.status + ' ' + response.statusText);
     var properties = await response.json();
-    showFeaturePopup(properties, e.lngLat, sampleGeojsonUrl);
+    showFeaturePopup(properties, e.lngLat, sampleGeojsonUrl, fallback._id);
   } catch(error) {
-    showFeaturePopup(fallback, e.lngLat, null);
+    showFeaturePopup(fallback, e.lngLat, null, fallback._id);
   }
+}
+
+function interactiveDatasetLayerIds() {
+  return activeInteractiveLayerIds.length ? activeInteractiveLayerIds.slice() : CLICKABLE_LAYERS.slice();
 }
 
 function sampleUrlForClick(dataset, event, format) {
@@ -605,7 +668,7 @@ function clickMbr(point, pixelRadius) {
   ].map(function(value){ return Number(value.toFixed(6)); });
 }
 
-function showFeaturePopup(properties, lngLat, geojsonUrl) {
+function showFeaturePopup(properties, lngLat, geojsonUrl, featureId) {
   if (!properties || !Object.keys(properties).length) return;
   var rows = Object.keys(properties).filter(function(key){
     return key !== 'geometry' && key.indexOf('_') !== 0;
@@ -747,7 +810,15 @@ function showFeaturePopup(properties, lngLat, geojsonUrl) {
 
   renderRows();
   if (activePopup) activePopup.remove();
-  activePopupState = {search: search, regexBtn: regexBtn, hideNulls: hideNulls, body: body};
+  activePopupState = {
+    search: search,
+    regexBtn: regexBtn,
+    hideNulls: hideNulls,
+    body: body,
+    featureId: Number.isSafeInteger(featureId)
+      ? featureId
+      : (Number.isSafeInteger(properties && properties._id) ? properties._id : null)
+  };
   activePopup = new maplibregl.Popup({maxWidth:'420px',closeButton:true}).setLngLat(lngLat).setDOMContent(container).addTo(map);
   activePopup.on('close', function(){ activePopupState = null; });
 }
@@ -1245,26 +1316,85 @@ function resetToDefaultStyle() {
 function resetStyleToServerDefault() {
   if (!map || !currentDatasetInfo) return;
   var serverDocument = clone(activeDatasetStyle.serverDocument);
-  activeDatasetStyle = normalizeDatasetStyle(serverDocument, serverDocument);
-  syncStylePanelFromDocument(activeDatasetStyle.document);
-  resetToDefaultStyle();
-  applyLabelsFromStylePanel();
-  renderStyleLegend(activeDatasetStyle.document);
-  updateVectorTileAttributes(tileAttributesForStyle(activeDatasetStyle.document));
+  activeDatasetStyle.serverDocument = clone(serverDocument);
+  applyLocalStyleDocument(serverDocument);
 }
 
 function applyLocalStyleDocument(style) {
   if (!style || style.version !== 8 || !Array.isArray(style.layers)) return false;
   var serverDocument = activeDatasetStyle.serverDocument;
+  var highlight = currentHighlight && clone(currentHighlight);
   activeDatasetStyle = normalizeDatasetStyle(style, serverDocument);
-  currentTileAttributesKey = tileAttributesKey(tileAttributesForStyle(activeDatasetStyle.document));
-  clearDatasetLayer();
-  addDatasetSourceAndLayers(currentDatasetInfo.visualization || {}, activeDatasetStyle.layers);
+  currentTileAttributesKey = tileAttributesKey(tileAttributesForStyle(activeDatasetStyle.document, overlayAttributes()));
+  clearDatasetLayer({preserveHighlight:true});
+  addDatasetSourceAndStyleLayers(
+    currentDatasetInfo.visualization || {},
+    activeDatasetStyle.document,
+    activeDatasetStyle.layers
+  );
+  if (highlight) applyFeatureHighlight(highlight);
   attachClickableCursors();
   syncStylePanelFromDocument(activeDatasetStyle.document);
-  applyLabelsFromStylePanel();
+  syncDatasetLabelRenderer();
   renderStyleLegend(activeDatasetStyle.document);
   return true;
+}
+
+async function applyFeatureHighlight(action) {
+  if (!action || !Number.isSafeInteger(action.feature_id) || !isHexColor(action.color)) return false;
+  if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) {
+    await selectDataset(action.dataset_id, {fitBounds:false});
+  }
+  clearFeatureHighlight();
+  var layerSource = (currentDatasetInfo.visualization || {}).type === 'VectorTile'
+    ? {'source-layer':sourceLayer}
+    : {};
+  var idFilter = ['==', ['get','_id'], action.feature_id];
+  var layers = [
+    Object.assign({
+      id:'ucrstar-highlight-fill',
+      type:'fill',
+      source:DATASET_SOURCE,
+      filter:['all', idFilter, ['==',['geometry-type'],'Polygon']],
+      paint:{'fill-color':action.color,'fill-opacity':0.3}
+    }, layerSource),
+    Object.assign({
+      id:'ucrstar-highlight-line',
+      type:'line',
+      source:DATASET_SOURCE,
+      filter:['all', idFilter, ['any',
+        ['==',['geometry-type'],'Polygon'],
+        ['==',['geometry-type'],'LineString']
+      ]],
+      paint:{'line-color':action.color,'line-opacity':1,'line-width':5}
+    }, layerSource),
+    Object.assign({
+      id:'ucrstar-highlight-point',
+      type:'circle',
+      source:DATASET_SOURCE,
+      filter:['all', idFilter, ['==',['geometry-type'],'Point']],
+      paint:{
+        'circle-color':action.color,
+        'circle-opacity':0.95,
+        'circle-radius':9,
+        'circle-stroke-color':'#111827',
+        'circle-stroke-width':2
+      }
+    }, layerSource)
+  ];
+  layers.forEach(function(layer){
+    if (addStyledLayer(layer, null)) activeHighlightLayerIds.push(layer.id);
+  });
+  currentHighlight = clone(action);
+  return activeHighlightLayerIds.length > 0;
+}
+
+function clearFeatureHighlight() {
+  activeHighlightLayerIds.forEach(function(layerId){
+    if (map.getLayer(layerId)) map.removeLayer(layerId);
+  });
+  activeHighlightLayerIds = [];
+  currentHighlight = null;
 }
 
 function resetLegend() {
@@ -1275,7 +1405,7 @@ function resetLegend() {
   }
 }
 
-var _labelAttr = null, _labelSize = 12, _labelColor = '#202124', _labelFrame = null;
+var _labelConfig = null, _pointIconConfig = null, _labelFrame = null;
 
 function _getCanvas(){ return document.getElementById('label-canvas'); }
 function _getCtx(){ var c=_getCanvas(); return c?c.getContext('2d'):null; }
@@ -1289,85 +1419,225 @@ function ensureLabelCanvas() {
 function _resizeLabelCanvas(){ var c=_getCanvas(); if(!c)return; var el=document.getElementById('map'); c.width=el.offsetWidth; c.height=el.offsetHeight; }
 function _clearLabels(){ var c=_getCanvas(), ctx=_getCtx(); if(ctx&&c) ctx.clearRect(0,0,c.width,c.height); }
 function _scheduleRender(){ if(!_labelFrame) _labelFrame=requestAnimationFrame(_renderLabels); }
-function applyLabels(attr, fontSize, color){
-  _labelAttr = attr || null; _labelSize = parseInt(fontSize, 10) || 12; _labelColor = color || '#202124';
-  if (!_labelAttr) {_clearLabels(); return;}
-  _scheduleRender();
-  if (map && !map._labelsBound) {
-    map._labelsBound = true;
-    map.on('render', _scheduleRender);
-    map.on('zoomend', _scheduleRender);
-  }
+function applyLabels(attr, fontSize, color, options){
+  options = options || {};
+  var background = options.background || 'light';
+  if (background === 'white' || background === 'color') background = 'light';
+  _labelConfig = attr ? {
+    attribute:String(attr),
+    size:Math.max(8, Math.min(64, Number(fontSize) || 12)),
+    color:isHexColor(color) ? color : '#202124',
+    background:['none','light','dark'].indexOf(background) !== -1 ? background : 'light',
+    min_zoom:Number.isFinite(Number(options.min_zoom)) ? Number(options.min_zoom) : 0,
+    max_zoom:Number.isFinite(Number(options.max_zoom)) ? Number(options.max_zoom) : 24,
+    allow_overlap:options.allow_overlap === true,
+    placement:'center'
+  } : null;
+  _syncOverlayBinding();
+  if (options.refreshAttributes !== false) refreshOverlayTileAttributes();
 }
 
 function applyLabelsFromStylePanel() {
   applyLabels(
     (labelSelect || {value:''}).value,
     (document.getElementById('labelSize') || {value:'12'}).value,
-    (document.getElementById('labelColor') || {value:'#202124'}).value
+    (document.getElementById('labelColor') || {value:'#202124'}).value,
+    {
+      background:(document.getElementById('labelBg') || {value:'white'}).value,
+      min_zoom:Number((document.getElementById('labelMinZoom') || {value:0}).value) || 0
+    }
   );
 }
-function _detachLabelRenderer(){
+function syncDatasetLabelRenderer() {
+  if (!_labelConfig) applyLabelsFromStylePanel();
+  else _syncOverlayBinding();
+}
+function _syncOverlayBinding(){
+  var active = !!(_labelConfig || _pointIconConfig);
+  if (active && map && !map._labelsBound) {
+    map._labelsBound = true;
+    map.on('render', _scheduleRender);
+    map.on('zoomend', _scheduleRender);
+  } else if (!active && map && map._labelsBound) {
+    map.off('render', _scheduleRender);
+    map.off('zoomend', _scheduleRender);
+    map._labelsBound = false;
+  }
+  if (active) _scheduleRender();
+  else _clearLabels();
+}
+function _resetOverlayRenderer(){
   if (map && map._labelsBound) {
     map.off('render', _scheduleRender);
     map.off('zoomend', _scheduleRender);
     map._labelsBound = false;
   }
   _clearLabels();
-  _labelAttr = null;
+  _labelConfig = null;
+  _pointIconConfig = null;
+}
+function overlayAttributes(){
+  var attributes = [];
+  if (_labelConfig && _labelConfig.attribute) attributes.push(_labelConfig.attribute);
+  if (_pointIconConfig && _pointIconConfig.attribute) attributes.push(_pointIconConfig.attribute);
+  return attributes;
+}
+function refreshOverlayTileAttributes(){
+  if (!activeDatasetStyle || !activeDatasetStyle.document) return;
+  updateVectorTileAttributes(tileAttributesForStyle(activeDatasetStyle.document, overlayAttributes()));
+  _scheduleRender();
+}
+function applyAssistantLabels(action){
+  applyLabels(action.attribute, action.size, action.color, {
+    background:action.background,
+    min_zoom:action.min_zoom,
+    max_zoom:action.max_zoom,
+    allow_overlap:action.allow_overlap
+  });
+}
+function clearAssistantLabels(){
+  _labelConfig = null;
+  _syncOverlayBinding();
+  refreshOverlayTileAttributes();
+}
+function applyAssistantPointIcons(action){
+  _pointIconConfig = {
+    attribute:typeof action.attribute === 'string' && action.attribute ? action.attribute : null,
+    icons:action.icons && typeof action.icons === 'object' ? clone(action.icons) : {},
+    default_icon:typeof action.default_icon === 'string' ? action.default_icon : null,
+    size:Math.max(8, Math.min(64, Number(action.size) || 24)),
+    min_zoom:Number.isFinite(Number(action.min_zoom)) ? Number(action.min_zoom) : 0,
+    max_zoom:Number.isFinite(Number(action.max_zoom)) ? Number(action.max_zoom) : 24,
+    allow_overlap:action.allow_overlap === true
+  };
+  _syncOverlayBinding();
+  refreshOverlayTileAttributes();
+}
+function clearAssistantPointIcons(){
+  _pointIconConfig = null;
+  _syncOverlayBinding();
+  refreshOverlayTileAttributes();
 }
 function _renderLabels() {
   _labelFrame = null;
   var ctx = _getCtx(), canvas = _getCanvas();
-  if (!ctx || !canvas || !map || !_labelAttr) {_clearLabels(); return;}
-  var minZoomEl = document.getElementById('labelMinZoom');
-  if (map.getZoom() < (minZoomEl ? parseFloat(minZoomEl.value) : 0)) {_clearLabels(); return;}
+  if (!ctx || !canvas || !map || !(_labelConfig || _pointIconConfig)) {_clearLabels(); return;}
+  var zoom = map.getZoom();
+  var labelsActive = _labelConfig && zoom >= _labelConfig.min_zoom && zoom <= _labelConfig.max_zoom;
+  var iconsActive = _pointIconConfig && zoom >= _pointIconConfig.min_zoom && zoom <= _pointIconConfig.max_zoom;
+  if (!labelsActive && !iconsActive) {_clearLabels(); return;}
   _resizeLabelCanvas(); _clearLabels();
-  var layers = CLICKABLE_LAYERS.filter(function(l){try{return map.getLayer(l);}catch(e){return false;}});
+  var overlayLayers = activeDatasetLayerIds.length ? activeDatasetLayerIds : interactiveDatasetLayerIds();
+  var layers = overlayLayers.filter(function(l){try{return map.getLayer(l);}catch(e){return false;}});
+  if (!layers.length) return;
   var features; try { features = map.queryRenderedFeatures({layers:layers}); } catch(e) { return; }
   if (!features || !features.length) return;
-  var fs = Math.round(_labelSize * Math.max(0.7, Math.min(2.0, 0.5 + map.getZoom()/12)));
-  ctx.font = '600 '+fs+'px system-ui,-apple-system,sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  var seen = {}, placed = [], bgMode = (document.getElementById('labelBg') || {value:'white'}).value;
+  var seen = {}, placed = [];
   features.forEach(function(f){
-    var val = f.properties && f.properties[_labelAttr];
-    if (val == null || val === '') return;
-    var fid = f.id != null ? String(f.id) : JSON.stringify(f.properties).slice(0,60);
+    var properties = f.properties || {};
+    var labelValue = labelsActive ? properties[_labelConfig.attribute] : null;
+    var labelText = labelValue == null || labelValue === '' ? null : String(labelValue);
+    var iconText = iconsActive ? pointIconForFeature(f, _pointIconConfig) : null;
+    if (!labelText && !iconText) return;
+    var stableId = properties._id != null ? properties._id : f.id;
+    var fid = stableId != null ? String(stableId) : JSON.stringify(properties).slice(0,120);
     if (seen[fid]) return;
     seen[fid] = true;
     var coord = featureLabelCoordinate(f.geometry);
     if (!coord) return;
     var pt = map.project(coord);
     if (pt.x < 0 || pt.y < 0 || pt.x > canvas.width || pt.y > canvas.height) return;
-    var text = String(val), width = ctx.measureText(text).width;
-    if (placed.some(function(p){ return !(pt.x+width/2 < p.x1 || pt.x-width/2 > p.x2 || pt.y+fs/2 < p.y1 || pt.y-fs/2 > p.y2); })) return;
-    placed.push({x1:pt.x-width/2-4, x2:pt.x+width/2+4, y1:pt.y-fs/2-4, y2:pt.y+fs/2+4});
-    if (bgMode !== 'none') {
-      ctx.fillStyle = bgMode === 'dark' ? 'rgba(20,20,20,0.78)' : 'rgba(255,255,255,0.88)';
-      ctx.fillRect(pt.x-width/2-4, pt.y-fs/2-3, width+8, fs+6);
-    } else {
-      ctx.strokeStyle = 'rgba(255,255,255,0.92)';
-      ctx.lineWidth = 3;
-      ctx.strokeText(text, pt.x, pt.y);
+    var iconSize = iconText ? _pointIconConfig.size : 0;
+    var labelSize = labelText ? _labelConfig.size : 0;
+    var labelWidth = 0;
+    if (labelText) {
+      ctx.font = '600 '+labelSize+'px system-ui,-apple-system,sans-serif';
+      labelWidth = ctx.measureText(labelText).width;
     }
-    ctx.fillStyle = bgMode === 'dark' ? '#fff' : _labelColor;
-    ctx.fillText(text, pt.x, pt.y);
+    var width = Math.max(iconSize, labelWidth) + 8;
+    var height = iconSize + (iconText && labelText ? 4 : 0) + labelSize + 8;
+    var box = {x1:pt.x-width/2, x2:pt.x+width/2, y1:pt.y-height/2, y2:pt.y+height/2};
+    var allowOverlap = (!iconText || _pointIconConfig.allow_overlap) && (!labelText || _labelConfig.allow_overlap);
+    if (!allowOverlap && placed.some(function(other){ return boxesOverlap(box, other); })) return;
+    if (!allowOverlap) placed.push(box);
+    var iconY = pt.y - (labelText ? (labelSize + 4)/2 : 0);
+    if (iconText) {
+      ctx.font = iconSize+'px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+      ctx.fillStyle = '#202124';
+      ctx.fillText(iconText, pt.x, iconY);
+    }
+    if (labelText) {
+      var labelY = pt.y + (iconText ? (iconSize + 4)/2 : 0);
+      drawCanvasLabel(ctx, labelText, pt.x, labelY, labelWidth, labelSize, _labelConfig);
+    }
   });
+}
+function pointIconForFeature(feature, config){
+  if (!feature || !feature.geometry || ['Point','MultiPoint'].indexOf(feature.geometry.type) === -1) return null;
+  if (config.attribute) {
+    var value = feature.properties && feature.properties[config.attribute];
+    if (value != null && Object.prototype.hasOwnProperty.call(config.icons, String(value))) {
+      return config.icons[String(value)];
+    }
+  }
+  return config.default_icon || null;
+}
+function boxesOverlap(a, b){
+  return !(a.x2 < b.x1 || a.x1 > b.x2 || a.y2 < b.y1 || a.y1 > b.y2);
+}
+function drawCanvasLabel(ctx, text, x, y, width, size, config){
+  ctx.font = '600 '+size+'px system-ui,-apple-system,sans-serif';
+  if (config.background !== 'none') {
+    ctx.fillStyle = config.background === 'dark' ? 'rgba(20,20,20,0.78)' : 'rgba(255,255,255,0.88)';
+    ctx.fillRect(x-width/2-4, y-size/2-3, width+8, size+6);
+  } else {
+    ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+    ctx.lineWidth = 3;
+    ctx.strokeText(text, x, y);
+  }
+  ctx.fillStyle = config.background === 'dark' ? '#fff' : config.color;
+  ctx.fillText(text, x, y);
 }
 function featureLabelCoordinate(g) {
   if (!g) return null;
-  if (g.type === 'Point') return g.coordinates;
-  if (g.type === 'LineString') return g.coordinates[Math.floor(g.coordinates.length/2)];
-  if (g.type === 'MultiLineString') return g.coordinates[0][Math.floor(g.coordinates[0].length/2)];
+  if (g.type === 'Point') return Array.isArray(g.coordinates) ? g.coordinates : null;
+  if (g.type === 'MultiPoint') return g.coordinates && g.coordinates[0] || null;
+  if (g.type === 'LineString') return g.coordinates && g.coordinates.length ? g.coordinates[Math.floor(g.coordinates.length/2)] : null;
+  if (g.type === 'MultiLineString') {
+    var longestLine = (g.coordinates || []).slice().sort(function(a,b){ return b.length-a.length; })[0];
+    return longestLine && longestLine[Math.floor(longestLine.length/2)];
+  }
   var ring = null;
-  if (g.type === 'Polygon') ring = g.coordinates[0];
-  if (g.type === 'MultiPolygon') ring = g.coordinates[0] && g.coordinates[0][0];
+  if (g.type === 'Polygon') ring = g.coordinates && g.coordinates[0];
+  if (g.type === 'MultiPolygon') {
+    (g.coordinates || []).forEach(function(polygon){
+      var candidate = polygon && polygon[0];
+      if (candidate && (!ring || Math.abs(ringSignedArea(candidate)) > Math.abs(ringSignedArea(ring)))) ring = candidate;
+    });
+  }
   if (!ring) return null;
-  var sx = 0, sy = 0;
-  ring.forEach(function(c){ sx += c[0]; sy += c[1]; });
-  return [sx/ring.length, sy/ring.length];
+  return ringCentroid(ring);
+}
+function ringSignedArea(ring){
+  var twiceArea = 0;
+  for (var i=0; i<ring.length-1; i++) twiceArea += ring[i][0]*ring[i+1][1] - ring[i+1][0]*ring[i][1];
+  return twiceArea/2;
+}
+function ringCentroid(ring){
+  if (!ring || !ring.length) return null;
+  var twiceArea = 0, x = 0, y = 0;
+  for (var i=0; i<ring.length-1; i++) {
+    var cross = ring[i][0]*ring[i+1][1] - ring[i+1][0]*ring[i][1];
+    twiceArea += cross;
+    x += (ring[i][0]+ring[i+1][0])*cross;
+    y += (ring[i][1]+ring[i+1][1])*cross;
+  }
+  if (Math.abs(twiceArea) > 1e-12) return [x/(3*twiceArea), y/(3*twiceArea)];
+  var sx = 0, sy = 0, count = 0;
+  ring.forEach(function(coord){ if (coord && coord.length >= 2) {sx += coord[0]; sy += coord[1]; count++;} });
+  return count ? [sx/count, sy/count] : null;
 }
 
 function applyStyle(){
@@ -1392,9 +1662,13 @@ function applyStyle(){
       }
     }
   }
-  applyLabels(labelAttr, (document.getElementById('labelSize') || {value:'12'}).value, (document.getElementById('labelColor') || {value:'#202124'}).value);
+  applyLabels(labelAttr, (document.getElementById('labelSize') || {value:'12'}).value, (document.getElementById('labelColor') || {value:'#202124'}).value, {
+    background:(document.getElementById('labelBg') || {value:'white'}).value,
+    min_zoom:Number((document.getElementById('labelMinZoom') || {value:0}).value) || 0,
+    refreshAttributes:false
+  });
   captureLocalStyleDocument(labelAttr);
-  updateVectorTileAttributes(tileAttributesForStyle(activeDatasetStyle.document));
+  updateVectorTileAttributes(tileAttributesForStyle(activeDatasetStyle.document, overlayAttributes()));
 }
 
 function captureLocalStyleDocument(labelAttribute) {
@@ -1412,7 +1686,7 @@ function captureLocalStyleDocument(labelAttribute) {
       } catch(e) {}
     });
   });
-  updateLabelStyleLayer(documentStyle, labelAttribute);
+  documentStyle.layers = documentStyle.layers.filter(function(layer){ return !layer || layer.type !== 'symbol'; });
   if (documentStyle.metadata && documentStyle.metadata['ucrstar:legend']) {
     delete documentStyle.metadata['ucrstar:legend'];
   }
@@ -1423,41 +1697,6 @@ function lineMapLayerId(layer) {
   if (layer.id === 'outline') return 'outline';
   var filterText = JSON.stringify(layer.filter || []);
   return filterText.indexOf('Polygon') !== -1 ? 'outline' : 'lines';
-}
-
-function updateLabelStyleLayer(style, labelAttribute) {
-  var symbolIndex = style.layers.findIndex(function(layer){ return layer && layer.type === 'symbol'; });
-  if (!labelAttribute) {
-    if (symbolIndex !== -1) style.layers.splice(symbolIndex, 1);
-    return;
-  }
-  var symbol = symbolIndex === -1 ? {
-    id:'labels',
-    type:'symbol',
-    source:'dataset',
-    layout:{},
-    paint:{}
-  } : style.layers[symbolIndex];
-  if (symbolIndex === -1) {
-    var visualization = currentDatasetInfo.visualization || {};
-    if (visualization.type === 'VectorTile') symbol['source-layer'] = visualization.source_layer || sourceLayer;
-    style.layers.push(symbol);
-  }
-  symbol.minzoom = Number((document.getElementById('labelMinZoom') || {value:0}).value) || 0;
-  symbol.layout = Object.assign({}, symbol.layout, {
-    'text-field':['get', labelAttribute],
-    'text-size':Number((document.getElementById('labelSize') || {value:12}).value) || 12
-  });
-  var color = (document.getElementById('labelColor') || {value:'#202124'}).value;
-  var background = (document.getElementById('labelBg') || {value:'white'}).value;
-  symbol.paint = Object.assign({}, symbol.paint, {'text-color':color});
-  if (background === 'none') {
-    symbol.paint['text-halo-width'] = 0;
-    delete symbol.paint['text-halo-color'];
-  } else {
-    symbol.paint['text-halo-width'] = 2;
-    symbol.paint['text-halo-color'] = background === 'dark' ? 'rgba(20,20,20,0.78)' : '#ffffff';
-  }
 }
 
 function getAttributeStats(attrName, opts){
@@ -1723,6 +1962,23 @@ function escapeHtml(value){
     return el;
   }
 
+  function assistantMessageText(content){
+    var text = String(content || '').trim();
+    var candidate = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    try {
+      var structured = JSON.parse(candidate);
+      if (structured && Array.isArray(structured.tool_calls)) {
+        return typeof structured.message === 'string' && structured.message.trim()
+          ? structured.message.trim()
+          : 'I could not complete that map operation.';
+      }
+    } catch(e) {}
+    if (/^\s*\{/.test(candidate) && /"tool_calls"\s*:/.test(candidate)) {
+      return 'I could not complete that map operation.';
+    }
+    return text;
+  }
+
   function replaceMessages(type, content){
     var box = document.getElementById('aiMsgs');
     if (box) box.innerHTML = '';
@@ -1815,6 +2071,14 @@ function escapeHtml(value){
     };
     if (currentDatasetInfo) context.dataset_id = currentDatasetInfo.id || currentDatasetInfo.name;
     if (activeDatasetStyle && activeDatasetStyle.document) context.style = clone(activeDatasetStyle.document);
+    if (_labelConfig) context.labels = clone(_labelConfig);
+    if (_pointIconConfig) context.point_icons = clone(_pointIconConfig);
+    if (activePopupState && Number.isSafeInteger(activePopupState.featureId)) {
+      context.selected_feature_id = activePopupState.featureId;
+    }
+    if (currentHighlight && Number.isSafeInteger(currentHighlight.feature_id)) {
+      context.highlighted_feature_id = currentHighlight.feature_id;
+    }
     if (map) {
       var bounds = map.getBounds();
       var center = map.getCenter();
@@ -1880,7 +2144,7 @@ function escapeHtml(value){
       }
       if (!data || !data.message) throw new Error('The server returned an invalid chat response');
       saveSession(data.session_id);
-      addMsg('bot', data.message.content || '');
+      addMsg('bot', assistantMessageText(data.message.content));
       await handleActions(data.actions || []);
     } catch(e) {
       addMsg('err', 'Chat error: '+e.message);
@@ -1920,6 +2184,43 @@ function escapeHtml(value){
         basemapMode = action.basemap;
         updateBasemapMode();
         applied.push((action.basemap === 'satellite' ? 'Satellite' : 'Street')+' basemap selected');
+      } else if (action.type === 'apply_style' && action.style && action.style.version === 8) {
+        if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) {
+          await selectDataset(action.dataset_id, {fitBounds:false});
+        }
+        if (applyLocalStyleDocument(action.style)) applied.push('Map style applied');
+      } else if (action.type === 'reset_style') {
+        if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) {
+          await selectDataset(action.dataset_id, {fitBounds:false});
+        }
+        resetStyleToServerDefault();
+        applied.push('Server-default style restored');
+      } else if (action.type === 'highlight_feature') {
+        if (await applyFeatureHighlight(action)) applied.push('Feature '+action.feature_id+' highlighted');
+      } else if (action.type === 'clear_highlight') {
+        if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) continue;
+        clearFeatureHighlight();
+        applied.push('Feature highlight cleared');
+      } else if (action.type === 'set_labels') {
+        if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) {
+          await selectDataset(action.dataset_id, {fitBounds:false});
+        }
+        applyAssistantLabels(action);
+        applied.push('Labels added for '+action.attribute);
+      } else if (action.type === 'clear_labels') {
+        if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) continue;
+        clearAssistantLabels();
+        applied.push('Labels removed');
+      } else if (action.type === 'set_point_icons') {
+        if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) {
+          await selectDataset(action.dataset_id, {fitBounds:false});
+        }
+        applyAssistantPointIcons(action);
+        applied.push('Point icons applied');
+      } else if (action.type === 'clear_point_icons') {
+        if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) continue;
+        clearAssistantPointIcons();
+        applied.push('Point icons removed');
       }
     }
     if (applied.length) addMsg('info', applied.join(' · '));

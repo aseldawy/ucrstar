@@ -293,7 +293,8 @@ Send a message with `POST /llm/chat.json`:
       "zoom": 9
     },
     "basemap": "street",
-    "style": {}
+    "style": {},
+    "selected_feature_id": 42
   }
 }
 ```
@@ -318,10 +319,36 @@ The limits are configured under `llm.chat` with `viewport_max_features`,
 `viewport_sample_size`, `viewport_max_attributes`, and `viewport_top_values`.
 Geocoding endpoint, user agent, and timeout are configured under `llm.geocoding`.
 
+Conversational styling returns a validated `apply_style` action containing a complete
+MapLibre v8 dataset style. It supports data expressions, filters, zoom-dependent styling,
+heatmaps, fill extrusions, categorical classes, palettes, outlines, and other
+dataset-layer properties beyond the simple styling popup. The server discards model-supplied
+sources and binds every layer to the selected dataset. Attribute expressions may reference
+only cataloged fields and the numeric MVT `_id` field; document size, layer count, expression
+size, zoom ranges, layer IDs, and paint-property families are bounded and validated.
+
+Labels and Unicode point icons use separate validated actions rather than MapLibre symbol
+layers. `set_labels` draws a selected attribute at the representative center of each visible
+feature, with bounded size, color, background, zoom range, and collision settings.
+`set_point_icons` can draw one symbol for every point or map up to 100 exact categorical
+values to emoji, with an optional default symbol. The browser renders both on its map canvas
+using system text and emoji fonts, so they do not require a style `glyphs` URL or sprite.
+Their current configurations are included in subsequent chat context, and dedicated clear
+actions remove either overlay.
+
+Vector-tile styles account for two display details. Low-zoom tiles can sample features, so
+users may need to zoom in to reveal omitted features. Small polygons and lines may also be
+encoded as Point geometry; when a generated style lacks a point representation, the server
+adds a zoom-aware circle fallback derived from the primary style colors. The assistant can
+highlight a selected or explicitly identified feature with `_id`, using fill, line, and point
+overlays that remain consistent across tile boundaries. Highlights and conversational styles
+are browser-session state and do not overwrite the catalog's server default.
+
 All tool calls, results, and validated actions are stored with the assistant message
 in `chat_messages.tool_calls_json` and `chat_messages.actions_json`, so later turns
-can refer to real search results without trusting invented IDs from the model. Style
-generation/editing and chat-initiated downloads remain unavailable in this phase.
+can refer to real search results without trusting invented IDs from the model. Multi-round
+tool execution allows a single request to search, select, then style a newly found dataset.
+Chat-initiated downloads remain unavailable in this phase.
 The integrated `builtin` backend remains available for offline enrichment and
 deterministic embeddings, but it does not provide conversational chat.
 
@@ -367,7 +394,8 @@ response, never values sampled from the current map viewport. Automatically
 generated categorical styles are kept only when their explicitly styled values
 account for at least 80% of all dataset records according to the stored
 statistics; otherwise the API returns a constant geometry color without a
-categorical legend.
+categorical legend. That heuristic applies to unattended dataset enrichment, not
+to an explicit categorical style requested through chat.
 
 For backward compatibility, `<ID>` falls back to the dataset directory name if
 no UUID matches.

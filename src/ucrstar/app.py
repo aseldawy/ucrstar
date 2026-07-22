@@ -26,6 +26,7 @@ from flask import (
 from werkzeug.serving import WSGIRequestHandler
 
 from .assistant_tools import AssistantTools, NominatimGeocoder, ViewportSummarizer
+from .assistant_style import client_safe_style
 from .catalog import DatasetCatalog
 from .chat import (
     ChatModelNotAvailable,
@@ -106,6 +107,9 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         ),
         search_limit=int(chat_config.get("tool_search_limit", 10)),
         semantic_max_distance=float(chat_config.get("semantic_max_distance", 0.8)),
+        style_max_chars=int(chat_config.get("max_style_chars", 40_000)),
+        style_max_layers=int(chat_config.get("style_max_layers", 40)),
+        style_max_nodes=int(chat_config.get("style_max_nodes", 5_000)),
     )
     app.extensions["ucrstar_chat"] = ChatService(
         ChatStore(Path(app.config["DATABASE"])),
@@ -251,10 +255,12 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/datasets/<dataset_ref>/style.json")
     def dataset_style(dataset_ref: str) -> Response:
-        style = catalog().style(dataset_ref)
-        if style is None:
+        dataset = catalog().get(dataset_ref)
+        if dataset is None:
             return jsonify({"error": "dataset not found"}), 404
-        return jsonify(style)
+        style = catalog().style(dataset["id"])
+        assert style is not None
+        return jsonify(client_safe_style(style, dataset))
 
     @app.get("/datasets/<dataset_ref>/histogram.png")
     def dataset_histogram(dataset_ref: str) -> Response:
