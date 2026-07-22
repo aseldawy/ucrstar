@@ -69,12 +69,12 @@ class FakeBatch:
 def assistant_config(**chat_overrides) -> dict:
     return {
         "llm": {
-            "enabled": True,
-            "provider": "ollama",
+            "default": "ollama",
             "semantic_search": True,
             "chat": chat_overrides,
             "providers": {
                 "ollama": {
+                    "enabled": True,
                     "base_url": "http://unused.test",
                     "chat_model": "planner",
                     "embedding_model": "unit-embed",
@@ -578,8 +578,8 @@ def test_dataframe_query_tool_returns_a_small_grounded_viewport_answer(
             "scope": "current_viewport",
             "operation": "records",
             "matched_features": 1,
-            "columns": ["_id", "kind"],
-            "rows": [{"_id": 42, "kind": "park"}],
+            "columns": ["kind"],
+            "rows": [{"kind": "park"}],
             "truncated": False,
         }
     )
@@ -598,13 +598,13 @@ def test_dataframe_query_tool_returns_a_small_grounded_viewport_answer(
                                 }
                             ],
                             "operation": "records",
-                            "select": ["_id", "kind"],
+                            "select": ["kind"],
                             "limit": 5,
                         },
                     }
                 ]
             ),
-            final_message("Feature 42 is the visible park."),
+            final_message("The visible feature is a park."),
         ]
     )
     app = assistant_app(tmp_path, llm, dataframe_query_runner=runner)
@@ -626,7 +626,7 @@ def test_dataframe_query_tool_returns_a_small_grounded_viewport_answer(
     )
 
     assert response.status_code == 200
-    assert response.get_json()["message"]["content"] == "Feature 42 is the visible park."
+    assert response.get_json()["message"]["content"] == "The visible feature is a park."
     assert response.get_json()["actions"] == []
     assert len(runner.calls) == 1
     _, called_bounds, called_query = runner.calls[0]
@@ -643,9 +643,9 @@ def test_dataframe_query_tool_returns_a_small_grounded_viewport_answer(
         "combine": "and",
         "operation": "records",
         "limit": 5,
-        "select": ["_id", "kind"],
+        "select": ["kind"],
     }
-    assert '"rows":[{"_id":42,"kind":"park"}]' in llm.calls[1][-1]["content"]
+    assert '"rows":[{"kind":"park"}]' in llm.calls[1][-1]["content"]
 
 
 def test_dataframe_query_tool_requires_viewport_and_schema_fields(tmp_path: Path) -> None:
@@ -684,6 +684,161 @@ def test_dataframe_query_tool_requires_viewport_and_schema_fields(tmp_path: Path
     assert response.get_json()["actions"] == []
     assert runner.calls == []
     assert "current viewport is unavailable" in llm.calls[1][-1]["content"]
+
+
+def test_false_geometry_refusal_is_corrected_to_dataframe_bounds_query(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingDataFrameQueryRunner(
+        {
+            "dataset_id": "dataset-id",
+            "scope": "current_viewport",
+            "operation": "bounds",
+            "matched_features": 1,
+            "crs": "EPSG:4326",
+            "geometry_bounds": [-118.2, 33.9, -118.1, 34.0],
+        }
+    )
+    llm = PlanningLLM(
+        [
+            final_message(
+                "The query_dataframe tool can only return attributes; I cannot compute "
+                "the MBR from geometry."
+            ),
+            plan(
+                [
+                    {
+                        "name": "query_dataframe",
+                        "arguments": {
+                            "where": [
+                                {
+                                    "attribute": "kind",
+                                    "operator": "eq",
+                                    "value": "park",
+                                }
+                            ],
+                            "operation": "bounds",
+                        },
+                    }
+                ]
+            ),
+            final_message("The feature MBR is -118.2, 33.9, -118.1, 34.0."),
+        ]
+    )
+    app = assistant_app(tmp_path, llm, dataframe_query_runner=runner)
+    dataset = configure_vector_dataset(
+        app,
+        publish_dataset(app, "areas")["id"],
+    )
+
+    response = app.test_client().post(
+        "/llm/chat.json",
+        json={
+            "message": "Retrieve the MBR of the visible park geometries",
+            "context": {
+                "dataset_id": dataset["id"],
+                "viewport": {
+                    "bounds": [-119, 33, -117, 35],
+                    "center": [-118, 34],
+                    "zoom": 10,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["message"]["content"].startswith("The feature MBR")
+    assert response.get_json()["actions"] == []
+    assert len(runner.calls) == 1
+    assert runner.calls[0][2]["operation"] == "bounds"
+    assert runner.calls[0][2]["where"][0]["attribute"] == "kind"
+    assert "query_dataframe supports geometry-derived queries" in llm.calls[1][-1][
+        "content"
+    ]
+
+
+def test_focus_feature_returns_verified_bounds_and_attribute_highlight(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingDataFrameQueryRunner(
+        {
+            "dataset_id": "dataset-id",
+            "scope": "current_viewport",
+            "operation": "bounds",
+            "matched_features": 1,
+            "geometry_bounds": [-118.0971, 34.1668, -118.0945, 34.1691],
+            "crs": "EPSG:4326",
+        }
+    )
+    llm = PlanningLLM(
+        [
+            plan(
+                [
+                    {
+                        "name": "focus_feature",
+                        "arguments": {
+                            "attribute": "kind",
+                            "value": "park",
+                            "color": "#0000ff",
+                            "max_zoom": 20,
+                        },
+                    }
+                ]
+            ),
+            final_message("I focused and highlighted the matching park."),
+        ]
+    )
+    app = assistant_app(tmp_path, llm, dataframe_query_runner=runner)
+    dataset = configure_vector_dataset(
+        app,
+        publish_dataset(app, "areas")["id"],
+    )
+
+    response = app.test_client().post(
+        "/llm/chat.json",
+        json={
+            "message": "Highlight the identified park in blue and zoom to it",
+            "context": {
+                "dataset_id": dataset["id"],
+                "viewport": {
+                    "bounds": [-119, 33, -117, 35],
+                    "center": [-118, 34],
+                    "zoom": 10,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["actions"] == [
+        {
+            "type": "fit_bounds",
+            "query": "kind=park",
+            "label": "matching feature",
+            "bounds": [-118.0971, 34.1668, -118.0945, 34.1691],
+            "max_zoom": 20.0,
+        },
+        {
+            "type": "highlight_feature",
+            "dataset_id": dataset["id"],
+            "attribute": "kind",
+            "value": "park",
+            "color": "#0000ff",
+        },
+    ]
+    assert runner.calls[0][2] == {
+        "where": [
+            {
+                "attribute": "kind",
+                "operator": "eq",
+                "value": "park",
+                "case_sensitive": True,
+            }
+        ],
+        "combine": "and",
+        "operation": "bounds",
+        "limit": 2,
+    }
 
 
 def test_viewport_summary_is_bounded_and_marks_truncation(
@@ -727,9 +882,9 @@ def test_geodataframe_runner_filters_records_in_an_isolated_process(
     pandas = pytest.importorskip("pandas")
     frame = pandas.DataFrame(
         [
-            {"_id": 1, "kind": "Park", "name": "North"},
-            {"_id": 2, "kind": "school", "name": "Central"},
-            {"_id": 3, "kind": "park", "name": "South"},
+            {"record_id": 1, "kind": "Park", "name": "North"},
+            {"record_id": 2, "kind": "school", "name": "Central"},
+            {"record_id": 3, "kind": "park", "name": "South"},
         ]
     )
     monkeypatch.setattr(
@@ -740,6 +895,7 @@ def test_geodataframe_runner_filters_records_in_an_isolated_process(
         "id": "dataset-id",
         "name": "places",
         "schema": [
+            {"name": "record_id", "type": "integer"},
             {"name": "kind", "type": "string"},
             {"name": "name", "type": "string"},
         ],
@@ -756,7 +912,7 @@ def test_geodataframe_runner_filters_records_in_an_isolated_process(
                 }
             ],
             "operation": "records",
-            "select": ["_id", "name"],
+            "select": ["record_id", "name"],
             "limit": 10,
         },
         dataset,
@@ -771,10 +927,91 @@ def test_geodataframe_runner_filters_records_in_an_isolated_process(
 
     assert result["matched_features"] == 2
     assert result["rows"] == [
-        {"_id": 1, "name": "North"},
-        {"_id": 3, "name": "South"},
+        {"record_id": 1, "name": "North"},
+        {"record_id": 3, "name": "South"},
     ]
     assert result["truncated"] is False
+
+
+def test_geodataframe_runner_returns_bounded_geometry_facts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    geopandas = pytest.importorskip("geopandas")
+    geometry_module = pytest.importorskip("shapely.geometry")
+    frame = geopandas.GeoDataFrame(
+        [
+            {"record_id": 1, "kind": "park"},
+            {"record_id": 2, "kind": "school"},
+            {"record_id": 3, "kind": "park"},
+        ],
+        geometry=[
+            geometry_module.Point(0, 1),
+            geometry_module.Point(50, 50),
+            geometry_module.Point(3, 4),
+        ],
+        crs="EPSG:4326",
+    )
+    monkeypatch.setattr("starlet.query_dataset", lambda *args, **kwargs: [frame])
+    dataset = {
+        "id": "dataset-id",
+        "name": "places",
+        "schema": [
+            {"name": "record_id", "type": "integer"},
+            {"name": "kind", "type": "string"},
+        ],
+    }
+    (tmp_path / "places").mkdir()
+    runner = GeoDataFrameQueryRunner(
+        tmp_path,
+        timeout_seconds=2,
+        process_start_method="fork",
+    )
+    where = [{"attribute": "kind", "operator": "eq", "value": "park"}]
+
+    bounds_result = runner.run(
+        dataset,
+        [-180, -90, 180, 90],
+        normalize_dataframe_query(
+            {"where": where, "operation": "bounds"},
+            dataset,
+        ),
+    )
+    records_result = runner.run(
+        dataset,
+        [-180, -90, 180, 90],
+        normalize_dataframe_query(
+            {
+                "where": where,
+                "operation": "geometry_records",
+                "select": ["record_id"],
+                "geometry_fields": ["type", "bounds", "centroid"],
+                "limit": 5,
+            },
+            dataset,
+        ),
+    )
+
+    assert bounds_result["geometry_bounds"] == [0.0, 1.0, 3.0, 4.0]
+    assert bounds_result["crs"] == "EPSG:4326"
+    assert records_result["rows"] == [
+        {
+            "record_id": 1,
+            "geometry": {
+                "type": "Point",
+                "bounds": [0.0, 1.0, 0.0, 1.0],
+                "centroid": [0.0, 1.0],
+            },
+        },
+        {
+            "record_id": 3,
+            "geometry": {
+                "type": "Point",
+                "bounds": [3.0, 4.0, 3.0, 4.0],
+                "centroid": [3.0, 4.0],
+            },
+        },
+    ]
 
 
 def test_geodataframe_runner_terminates_a_timed_out_process(
@@ -857,6 +1094,14 @@ def test_dataframe_query_rejects_code_and_unknown_attributes() -> None:
             {"operation": "records", "select": ["missing"]},
             dataset,
         )
+    with pytest.raises(ValueError, match="geometry_fields containing"):
+        normalize_dataframe_query(
+            {
+                "operation": "geometry_records",
+                "geometry_fields": ["raw_coordinates"],
+            },
+            dataset,
+        )
 
 
 def test_invalid_tool_arguments_return_no_action_and_an_error_trace(tmp_path: Path) -> None:
@@ -920,6 +1165,9 @@ def test_frontend_dispatches_each_supported_assistant_action() -> None:
     assert "await selectDataset(action.dataset_id)" in javascript
     assert "action.type === 'fit_bounds' && validActionBounds(action.bounds)" in javascript
     assert "map.fitBounds(" in javascript
+    assert "await waitForMapLoad();\n        map.fitBounds(" not in javascript
+    assert "['==', ['get',action.attribute], action.value]" in javascript
+    assert "thinking = null" in javascript
     assert "action.type === 'change_basemap'" in javascript
     assert "updateBasemapMode()" in javascript
 

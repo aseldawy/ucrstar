@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 from ucrstar.app import create_app
+from ucrstar.chat import LLMRegistry
 
 
 class FakeChatLLM:
@@ -24,11 +25,11 @@ class FakeChatLLM:
 def enabled_config() -> dict:
     return {
         "llm": {
-            "enabled": True,
-            "provider": "ollama",
+            "default": "ollama",
             "semantic_search": True,
             "providers": {
                 "ollama": {
+                    "enabled": True,
                     "base_url": "http://unused.test",
                     "chat_model": "unit-chat",
                     "embedding_model": "unit-embed",
@@ -56,7 +57,7 @@ def test_capabilities_disable_chat_when_llm_is_disabled(tmp_path: Path) -> None:
             "TESTING": True,
             "DATASETS_DIR": tmp_path / "datasets",
             "DATABASE": tmp_path / "instance" / "test.sqlite",
-            "UCRSTAR2_CONFIG": {"llm": {"enabled": False}},
+            "UCRSTAR2_CONFIG": {"llm": {"providers": {}}},
         }
     )
 
@@ -66,7 +67,7 @@ def test_capabilities_disable_chat_when_llm_is_disabled(tmp_path: Path) -> None:
     assert response.get_json() == {
         "available": False,
         "status": "disabled",
-        "reason": "LLM support is disabled.",
+        "reason": "No LLM providers are enabled.",
         "default_model": None,
         "models": [],
         "capabilities": {
@@ -75,6 +76,8 @@ def test_capabilities_disable_chat_when_llm_is_disabled(tmp_path: Path) -> None:
             "semantic_search": False,
             "viewport_summary": False,
             "viewport_dataframe_query": False,
+            "viewport_geometry_query": False,
+            "query_result_focus": False,
             "style_generation": False,
             "feature_highlight": False,
             "text_labels": False,
@@ -110,6 +113,101 @@ def test_capabilities_publish_only_the_server_configured_model(tmp_path: Path) -
     assert "base_url" not in json.dumps(body)
 
 
+def test_capabilities_publish_all_valid_enabled_providers_and_configured_default(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": tmp_path / "datasets",
+            "DATABASE": tmp_path / "instance" / "test.sqlite",
+            "UCRSTAR2_CONFIG": {
+                "llm": {
+                    "default": "gemini",
+                    "providers": {
+                        "openai": {
+                            "enabled": False,
+                            "chat_model": "hidden-model",
+                        },
+                        "gemini": {
+                            "enabled": True,
+                            "api_key": "unit-key",
+                            "chat_model": "gemini-unit",
+                            "embedding_model": "gemini-embed",
+                        },
+                        "ollama": {
+                            "enabled": True,
+                            "base_url": "http://unused.test",
+                            "chat_model": "ollama-unit",
+                            "embedding_model": "ollama-embed",
+                        },
+                    },
+                }
+            },
+        }
+    )
+
+    body = app.test_client().get("/llm/capabilities.json").get_json()
+
+    assert body["available"] is True
+    assert body["default_model"] == "gemini:gemini-unit"
+    assert body["models"] == [
+        {
+            "id": "gemini:gemini-unit",
+            "label": "gemini-unit",
+            "provider": "gemini",
+        },
+        {
+            "id": "ollama:ollama-unit",
+            "label": "ollama-unit",
+            "provider": "ollama",
+        },
+    ]
+
+
+def test_registry_routes_and_caches_clients_by_selected_provider(monkeypatch) -> None:
+    config = {
+        "llm": {
+            "default": "gemini",
+            "providers": {
+                "gemini": {
+                    "enabled": True,
+                    "api_key": "unit-key",
+                    "chat_model": "gemini-unit",
+                },
+                "ollama": {
+                    "enabled": True,
+                    "base_url": "http://unused.test",
+                    "chat_model": "ollama-unit",
+                },
+            },
+        }
+    }
+    created = []
+
+    class RoutedClient:
+        enabled = True
+
+        def __init__(self, provider: str) -> None:
+            self.provider = provider
+
+    def fake_llm_from_config(received_config, provider=None):
+        assert received_config is config
+        created.append(provider)
+        return RoutedClient(provider)
+
+    monkeypatch.setattr("ucrstar.chat.llm_from_config", fake_llm_from_config)
+    registry = LLMRegistry(config)
+
+    gemini = registry.client("gemini:gemini-unit")
+    ollama = registry.client("ollama:ollama-unit")
+
+    assert gemini.provider == "gemini"
+    assert ollama.provider == "ollama"
+    assert registry.client("gemini:gemini-unit") is gemini
+    assert created == ["gemini", "ollama"]
+
+
 def test_integrated_enrichment_only_backend_does_not_advertise_chat(tmp_path: Path) -> None:
     app = create_app(
         {
@@ -118,10 +216,10 @@ def test_integrated_enrichment_only_backend_does_not_advertise_chat(tmp_path: Pa
             "DATABASE": tmp_path / "instance" / "test.sqlite",
             "UCRSTAR2_CONFIG": {
                 "llm": {
-                    "enabled": True,
-                    "provider": "integrated",
+                    "default": "integrated",
                     "providers": {
                         "integrated": {
+                            "enabled": True,
                             "backend": "builtin",
                             "chat_model": "builtin-heuristic",
                             "embedding_model": "builtin-hash",
@@ -250,14 +348,14 @@ def test_disabled_chat_endpoint_returns_service_unavailable(tmp_path: Path) -> N
             "TESTING": True,
             "DATASETS_DIR": tmp_path / "datasets",
             "DATABASE": tmp_path / "instance" / "test.sqlite",
-            "UCRSTAR2_CONFIG": {"llm": {"enabled": False}},
+            "UCRSTAR2_CONFIG": {"llm": {"providers": {}}},
         }
     )
 
     response = app.test_client().post("/llm/chat.json", json={"message": "Hello"})
 
     assert response.status_code == 503
-    assert response.get_json()["reason"] == "LLM support is disabled."
+    assert response.get_json()["reason"] == "No LLM providers are enabled."
 
 
 def test_frontend_uses_server_chat_instead_of_direct_ollama() -> None:
@@ -266,6 +364,8 @@ def test_frontend_uses_server_chat_instead_of_direct_ollama() -> None:
 
     assert "/llm/capabilities.json" in javascript
     assert "/llm/chat.json" in javascript
+    assert "ucrstar-ai-model-id" in javascript
+    assert "saveModel(modelSelect.value)" in javascript
     assert "localhost:11434" not in javascript
     assert "llama3.2" not in html
     assert "id=\"aiFab\" title=\"AI Assistant\" disabled" in html

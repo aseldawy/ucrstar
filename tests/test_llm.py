@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from ucrstar import llm as llm_module
@@ -16,11 +17,11 @@ def test_integrated_builtin_enriches_without_external_server() -> None:
     llm = llm_from_config(
         {
             "llm": {
-                "enabled": True,
-                "provider": "integrated",
+                "default": "integrated",
                 "max_description_chars": 80,
                 "providers": {
                     "integrated": {
+                        "enabled": True,
                         "backend": "builtin",
                         "model_path": "",
                         "chat_model": "builtin-heuristic",
@@ -53,10 +54,10 @@ def test_integrated_builtin_translates_esri_unique_value_renderer() -> None:
     llm = llm_from_config(
         {
             "llm": {
-                "enabled": True,
-                "provider": "integrated",
+                "default": "integrated",
                 "providers": {
                     "integrated": {
+                        "enabled": True,
                         "backend": "builtin",
                         "chat_model": "builtin-heuristic",
                         "embedding_model": "builtin-hash",
@@ -156,6 +157,85 @@ def test_integrated_model_resolver_downloads_missing_model(
     assert resolved.read_text(encoding="utf-8") == (
         "https://huggingface.co/org/model/resolve/main/model-q4_k_m.gguf"
     )
+
+
+def test_integrated_model_discovery_uses_ssl_context(monkeypatch) -> None:
+    calls = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "siblings": [
+                        {"rfilename": "model-q8_0.gguf"},
+                        {"rfilename": "model-q4_k_m.gguf"},
+                    ]
+                }
+            ).encode("utf-8")
+
+    context = object()
+    monkeypatch.setattr(llm_module, "ssl_context", lambda: context)
+
+    def fake_urlopen(url, timeout, context=None):
+        calls["url"] = url
+        calls["timeout"] = timeout
+        calls["context"] = context
+        return FakeResponse()
+
+    monkeypatch.setattr(llm_module.urllib.request, "urlopen", fake_urlopen)
+
+    model_file = llm_module.discover_gguf_file("org/model")
+
+    assert model_file == "model-q4_k_m.gguf"
+    assert calls == {
+        "url": "https://huggingface.co/api/models/org/model",
+        "timeout": 60,
+        "context": context,
+    }
+
+
+def test_integrated_model_download_uses_ssl_context(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    class FakeResponse:
+        chunks = [b"abc", b"def", b""]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self, size):
+            calls.setdefault("sizes", []).append(size)
+            return self.chunks.pop(0)
+
+    context = object()
+    monkeypatch.setattr(llm_module, "ssl_context", lambda: context)
+
+    def fake_urlopen(url, timeout, context=None):
+        calls["url"] = url
+        calls["timeout"] = timeout
+        calls["context"] = context
+        return FakeResponse()
+
+    monkeypatch.setattr(llm_module.urllib.request, "urlopen", fake_urlopen)
+
+    target_path = tmp_path / "model.gguf"
+    llm_module.download_file("https://example.test/model.gguf", target_path)
+
+    assert target_path.read_bytes() == b"abcdef"
+    assert not target_path.with_suffix(".gguf.part").exists()
+    assert calls["url"] == "https://example.test/model.gguf"
+    assert calls["timeout"] == 600
+    assert calls["context"] is context
+    assert calls["sizes"] == [1024 * 1024, 1024 * 1024, 1024 * 1024]
 
 
 def test_provider_http_uses_ssl_context() -> None:

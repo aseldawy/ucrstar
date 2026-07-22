@@ -16,8 +16,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "temp_dir": None,
     },
     "llm": {
-        "enabled": False,
-        "provider": "ollama",
+        "default": "ollama",
         "max_description_chars": 250,
         "semantic_search": True,
         "search_limit": 20,
@@ -49,23 +48,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "providers": {
             "openai": {
+                "enabled": False,
                 "api_key": "${OPENAI_API_KEY}",
                 "base_url": "https://api.openai.com/v1",
                 "chat_model": "gpt-4o-mini",
                 "embedding_model": "text-embedding-3-small",
             },
             "gemini": {
+                "enabled": False,
                 "api_key": "${GEMINI_API_KEY}",
                 "base_url": "https://generativelanguage.googleapis.com/v1beta",
                 "chat_model": "gemini-1.5-flash",
                 "embedding_model": "gemini-embedding-2",
             },
             "ollama": {
+                "enabled": False,
                 "base_url": "http://127.0.0.1:11434",
                 "chat_model": "llama3.1",
                 "embedding_model": "nomic-embed-text",
             },
             "integrated": {
+                "enabled": False,
                 "backend": "llama-cpp",
                 "model_dir": "models",
                 "model_id": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",

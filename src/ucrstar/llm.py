@@ -48,18 +48,22 @@ class LLMConfig:
     provider_config: dict[str, Any]
 
 
-def llm_from_config(config: dict[str, Any]) -> "LLMClient":
+def llm_from_config(
+    config: dict[str, Any],
+    provider: str | None = None,
+) -> "LLMClient":
     llm = config.get("llm") or {}
-    provider = llm.get("provider", "integrated")
+    provider = provider or llm.get("default", "integrated")
     providers = llm.get("providers") or {}
+    provider_config = providers.get(provider, {})
     settings = LLMConfig(
-        enabled=bool(llm.get("enabled", False)),
+        enabled=bool(provider_config.get("enabled", False)),
         provider=provider,
         max_description_chars=int(llm.get("max_description_chars", 250)),
         semantic_search=bool(llm.get("semantic_search", True)),
         search_limit=int(llm.get("search_limit", 20)),
         fallback_on_error=bool(llm.get("fallback_on_error", True)),
-        provider_config=providers.get(provider, {}),
+        provider_config=provider_config,
     )
 
     if not settings.enabled:
@@ -464,7 +468,7 @@ def safe_model_dir_name(model_id: str) -> str:
 
 def discover_gguf_file(model_id: str) -> str:
     metadata_url = f"https://huggingface.co/api/models/{model_id}"
-    with urllib.request.urlopen(metadata_url, timeout=60) as response:
+    with urllib.request.urlopen(metadata_url, timeout=60, context=ssl_context()) as response:
         metadata = json.loads(response.read().decode("utf-8"))
     files = [
         item.get("rfilename", "")
@@ -491,7 +495,7 @@ def hf_resolve_url(model_id: str, model_file: str) -> str:
 
 def download_file(url: str, target_path: Path) -> None:
     partial_path = target_path.with_suffix(target_path.suffix + ".part")
-    with urllib.request.urlopen(url, timeout=600) as response:
+    with urllib.request.urlopen(url, timeout=600, context=ssl_context()) as response:
         with partial_path.open("wb") as file:
             while True:
                 chunk = response.read(1024 * 1024)

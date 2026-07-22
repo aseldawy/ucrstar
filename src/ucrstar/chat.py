@@ -65,6 +65,12 @@ Text labels are supported through the set_labels canvas-overlay tool and Unicode
 are supported through set_point_icons. These overlays do not use MapLibre glyphs or sprites.
 Never claim that labels are unavailable because a MapLibre text-field layer was rejected;
 use set_labels instead.
+The query_dataframe tool can safely compute bounds/MBRs, geometry type counts, and bounded
+per-feature geometry type, bounds, and centroid summaries. Never claim it is limited to
+attributes when the user requests one of these supported geometry-derived results.
+When query_dataframe identifies one feature and the user asked to highlight or zoom to it,
+call focus_feature with a real unique dataset attribute and value from that trusted result.
+Do not treat an OBJECTID or another dataset field as the internal MVT _id.
 For vector tiles, remember that low zoom levels may be sampled and that small polygon or line
 features can arrive as Point geometry; a style cannot restore sampled-out features, and users
 may need to zoom in. Downloads are not available in this phase. Never expose server
@@ -91,50 +97,72 @@ class AssistantPlanParseError(ValueError):
 
 @dataclass
 class LLMRegistry:
-    """Resolve the server-configured public chat model and lazily create its client."""
+    """Resolve enabled public chat models and lazily create one client per provider."""
 
     config: dict[str, Any]
     client_override: Any = None
 
     def __post_init__(self) -> None:
-        self._client: LLMClient | Any | None = self.client_override
+        self._clients: dict[str, LLMClient | Any] = {}
 
     def capabilities(self) -> dict[str, Any]:
         llm = self.config.get("llm") or {}
-        provider = str(llm.get("provider") or "")
-        provider_config = (llm.get("providers") or {}).get(provider) or {}
-        chat_model = str(provider_config.get("chat_model") or "")
+        default_provider = str(llm.get("default") or "")
+        providers = llm.get("providers") or {}
+        models: list[dict[str, str]] = []
+        errors: list[str] = []
 
         if self.client_override is not None:
-            provider = str(getattr(self.client_override, "provider", provider or "configured"))
-            chat_model = str(getattr(self.client_override, "chat_model", chat_model or "configured"))
+            provider = str(
+                getattr(self.client_override, "provider", default_provider or "configured")
+            )
+            chat_model = str(getattr(self.client_override, "chat_model", "configured"))
             error = None if getattr(self.client_override, "enabled", True) else "LLM support is disabled."
             if not callable(getattr(self.client_override, "chat", None)):
                 error = "The configured LLM client does not support chat."
+            if error is None:
+                models.append(model_description(provider, chat_model))
         else:
-            error = configuration_error(llm, provider, provider_config, chat_model)
+            for provider, raw_provider_config in providers.items():
+                if not isinstance(raw_provider_config, dict) or not raw_provider_config.get(
+                    "enabled", False
+                ):
+                    continue
+                provider_config = raw_provider_config
+                chat_model = str(provider_config.get("chat_model") or "")
+                provider_error = configuration_error(
+                    str(provider), provider_config, chat_model
+                )
+                if provider_error is None:
+                    models.append(model_description(str(provider), chat_model))
+                else:
+                    errors.append(f"{provider}: {provider_error}")
+            error = None if models else (
+                "; ".join(errors) if errors else "No LLM providers are enabled."
+            )
 
-        available = error is None
-        model_id = f"{provider}:{chat_model}" if available else None
+        available = bool(models)
+        default_model = next(
+            (
+                model["id"]
+                for model in models
+                if model["provider"] == default_provider
+            ),
+            models[0]["id"] if models else None,
+        )
         semantic_search = bool(
             available
             and llm.get("semantic_search", True)
-            and provider_config.get("embedding_model")
-        )
-        models = []
-        if available and model_id is not None:
-            models.append(
-                {
-                    "id": model_id,
-                    "label": chat_model,
-                    "provider": provider,
-                }
+            and any(
+                ((providers.get(model["provider"]) or {}).get("embedding_model"))
+                for model in models
             )
+        )
         return {
             "available": available,
-            "status": "ready" if available else ("disabled" if not llm.get("enabled") else "misconfigured"),
+            "status": "ready" if available else ("misconfigured" if errors else "disabled"),
             "reason": error,
-            "default_model": model_id,
+            "default_model": default_model,
             "models": models,
             "capabilities": {
                 "chat": available,
@@ -142,6 +170,8 @@ class LLMRegistry:
                 "semantic_search": semantic_search,
                 "viewport_summary": available,
                 "viewport_dataframe_query": available,
+                "viewport_geometry_query": available,
+                "query_result_focus": available,
                 "style_generation": available,
                 "feature_highlight": available,
                 "text_labels": available,
@@ -173,22 +203,32 @@ class LLMRegistry:
                 return model
         raise ChatModelNotAvailable("The requested model is not configured on this server")
 
-    def client(self) -> Any:
-        if self._client is None:
-            self._client = llm_from_config(self.config)
-        if not getattr(self._client, "enabled", False):
+    def client(self, model_id: str | None = None) -> Any:
+        model = self.resolve_model(model_id)
+        if self.client_override is not None:
+            return self.client_override
+        provider = model["provider"]
+        if provider not in self._clients:
+            self._clients[provider] = llm_from_config(self.config, provider=provider)
+        client = self._clients[provider]
+        if not getattr(client, "enabled", False):
             raise ChatModelNotAvailable("LLM chat is unavailable")
-        return self._client
+        return client
+
+
+def model_description(provider: str, chat_model: str) -> dict[str, str]:
+    return {
+        "id": f"{provider}:{chat_model}",
+        "label": chat_model,
+        "provider": provider,
+    }
 
 
 def configuration_error(
-    llm: dict[str, Any],
     provider: str,
     provider_config: dict[str, Any],
     chat_model: str,
 ) -> str | None:
-    if not llm.get("enabled", False):
-        return "LLM support is disabled."
     if provider not in {"openai", "gemini", "ollama", "integrated"}:
         return "The configured LLM provider is not supported."
     if not chat_model:
@@ -418,7 +458,7 @@ class ChatService:
             }
         )
 
-        client = self.registry.client()
+        client = self.registry.client(selected_model["id"])
         max_tool_calls = min(20, max(0, int(chat_config.get("max_tool_calls", 5))))
         max_tool_rounds = min(10, max(1, int(chat_config.get("max_tool_rounds", 3))))
         remaining_tool_calls = max_tool_calls
@@ -526,7 +566,8 @@ class ChatService:
         messages = list(provider_messages)
         malformed_retry = False
         label_refusal_retry = False
-        for _attempt in range(3):
+        geometry_refusal_retry = False
+        for _attempt in range(4):
             raw_plan = str(client.chat(messages) or "").strip()
             if not raw_plan:
                 raise RuntimeError("The configured LLM returned an empty response")
@@ -570,6 +611,31 @@ class ChatService:
                                 "canvas-overlay tool. They do not require MapLibre glyphs. Use "
                                 "set_labels for the requested schema attribute now; do not repeat "
                                 "the glyph-source refusal. Return one valid JSON plan."
+                            ),
+                        },
+                    ]
+                )
+                continue
+            if (
+                not geometry_refusal_retry
+                and false_geometry_capability_refusal(plan, capability_request)
+            ):
+                geometry_refusal_retry = True
+                LOGGER.warning(
+                    "LLM incorrectly refused the available dataframe geometry capability"
+                )
+                messages.extend(
+                    [
+                        {"role": "assistant", "content": raw_plan},
+                        {
+                            "role": "user",
+                            "content": (
+                                "Correction: query_dataframe supports geometry-derived queries. "
+                                "Use operation bounds for the combined MBR, "
+                                "geometry_type_counts for geometry types, or geometry_records "
+                                "with geometry_fields type/bounds/centroid for per-feature facts. "
+                                "These operations do not return raw geometry and remain bounded. "
+                                "Use the appropriate operation now and return one valid JSON plan."
                             ),
                         },
                     ]
@@ -659,6 +725,7 @@ class ChatService:
                     context["style"] = client_safe_style(style, dataset)
                 context.pop("selected_feature_id", None)
                 context.pop("highlighted_feature_id", None)
+                context.pop("highlighted_feature", None)
                 context.pop("labels", None)
                 context.pop("point_icons", None)
             elif action_type == "apply_style":
@@ -671,9 +738,18 @@ class ChatService:
                 if style is not None and dataset is not None:
                     context["style"] = client_safe_style(style, dataset)
             elif action_type == "highlight_feature":
-                context["highlighted_feature_id"] = action["feature_id"]
+                if "feature_id" in action:
+                    context["highlighted_feature_id"] = action["feature_id"]
+                    context.pop("highlighted_feature", None)
+                else:
+                    context["highlighted_feature"] = {
+                        "attribute": action.get("attribute"),
+                        "value": action.get("value"),
+                    }
+                    context.pop("highlighted_feature_id", None)
             elif action_type == "clear_highlight":
                 context.pop("highlighted_feature_id", None)
+                context.pop("highlighted_feature", None)
             elif action_type == "set_labels":
                 context["dataset_id"] = action["dataset_id"]
                 context["labels"] = action_context(action)
@@ -706,6 +782,23 @@ class ChatService:
                 "tool": "set_point_icons",
                 "renderer": "canvas_overlay",
                 "requires_maplibre_sprites": False,
+            },
+            "geometry_queries": {
+                "available": True,
+                "tool": "query_dataframe",
+                "operations": [
+                    "bounds",
+                    "geometry_type_counts",
+                    "geometry_records",
+                ],
+                "geometry_record_fields": ["type", "bounds", "centroid"],
+                "returns_raw_geometry": False,
+            },
+            "query_result_focus": {
+                "available": True,
+                "tool": "focus_feature",
+                "requires_unique_attribute_value": True,
+                "actions": ["fit_bounds", "highlight_feature"],
             },
         }
         dataset_ref = result.pop("dataset_id", None)
@@ -755,6 +848,39 @@ def text_label_request(value: str) -> bool:
         re.search(
             r"\b(?:label|labels|labeled|labelled|labeling|labelling|text[- ]field|"
             r"zip codes?)\b",
+            value.lower(),
+        )
+    )
+
+
+def false_geometry_capability_refusal(
+    plan: dict[str, Any],
+    recent_user_text: str,
+) -> bool:
+    if plan.get("tool_calls") or not geometry_query_request(recent_user_text):
+        return False
+    response = str(plan.get("message") or "").lower()
+    mentions_geometry = bool(
+        re.search(
+            r"\b(?:geometry|geometric|mbr|minimum bounding|bounds?|bounding box|extent)\b",
+            response,
+        )
+    )
+    refuses = bool(
+        re.search(
+            r"\b(?:cannot|can't|unable|unavailable|not available|not supported|"
+            r"only (?:return|retrieve)|technical limitation)",
+            response,
+        )
+    )
+    return mentions_geometry and refuses
+
+
+def geometry_query_request(value: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:geometry|geometric|mbr|minimum bounding|bounds?|bounding box|extent|"
+            r"centroid|geometry type)\b",
             value.lower(),
         )
     )

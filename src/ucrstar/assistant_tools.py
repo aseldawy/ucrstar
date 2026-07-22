@@ -38,15 +38,26 @@ Available tools (request them only through tool_calls):
   "eq"|"ne"|"lt"|"lte"|"gt"|"gte"|"in"|"not_in"|"contains"|
   "starts_with"|"ends_with"|"is_null"|"not_null", "value"?: scalar|array,
   "case_sensitive"?: boolean}], "combine"?: "and"|"or", "operation"?:
-  "records"|"count"|"distinct"|"min"|"max"|"mean"|"sum", "select"?:
-  [attribute], "attribute"?: string, "limit"?: integer}. Run a bounded GeoPandas
+  "records"|"count"|"distinct"|"min"|"max"|"mean"|"sum"|"bounds"|
+  "geometry_type_counts"|"geometry_records", "select"?: [attribute],
+  "attribute"?: string, "geometry_fields"?: ["type"|"bounds"|"centroid"],
+  "limit"?: integer}. Run a bounded GeoPandas
   dataframe query over the selected dataset inside the current viewport. Use it to answer
   small, specific questions about matching properties or values. Use find_attributes first
   when the field is uncertain. records requires select; distinct/min/max/mean/sum require
-  attribute; count requires neither. This tool is read-only, runs in an isolated process
-  with a hard five-second deadline, and fails instead of returning an oversized result. It
-  accepts only this structured query form; never provide Python code or a pandas query
-  expression.
+  attribute; geometry_records requires geometry_fields and may include selected attributes.
+  Use bounds for the combined MBR of matching geometries, geometry_type_counts for their
+  geometry types, and geometry_records for bounded per-feature geometry facts. Raw geometry
+  coordinates are intentionally not returned. This tool is read-only, runs in an isolated
+  process with a hard five-second deadline, and fails instead of returning an oversized
+  result. It accepts only this structured query form; never provide Python code or a pandas
+  query expression.
+- focus_feature: {"attribute": string, "value": scalar, "color"?: "#RRGGBB",
+  "max_zoom"?: number}. Locate exactly one feature in the current viewport using a real
+  dataset attribute, compute its geometry bounds on the server, zoom to those verified
+  bounds, and highlight the same feature. Use this after query_dataframe identifies the
+  result of a request such as highest/lowest/most unusual. Never substitute a dataset
+  attribute such as OBJECTID for the internal _id; pass its real attribute name and value.
 - find_attributes: {"query": string, "dataset_id"?: string}. Search the complete schema
   of the selected dataset by field name and description. Use this before claiming that an
   attribute is absent, especially when dataset.schema_truncated is true, and when the user
@@ -67,9 +78,10 @@ Available tools (request them only through tool_calls):
   small features can be encoded as points at low zoom. Vector tiles may also be sampled;
   never claim that a style can reveal omitted features without zooming in.
 - reset_style: {}. Restore the selected dataset's server-provided style.
-- highlight_feature: {"feature_id"?: integer, "color"?: "#RRGGBB"}. Highlight a
-  feature across tile boundaries using its numeric _id. Omit feature_id only when
-  selected_feature_id is present in context.
+- highlight_feature: {"feature_id"?: integer, "attribute"?: string, "value"?: scalar,
+  "color"?: "#RRGGBB"}. Highlight a feature across tile boundaries. Use feature_id only
+  for the numeric MVT _id; for another unique field, provide its real attribute and value.
+  Omit identity arguments only when selected_feature_id is present in context.
 - clear_highlight: {}. Remove the current feature highlight.
 - set_labels: {"attribute": string, "dataset_id"?: string, "size"?: number,
   "color"?: "#RRGGBB", "background"?: "none"|"light"|"dark",
@@ -349,6 +361,8 @@ def execute_dataframe_query(payload: dict[str, Any]) -> dict[str, Any]:
     aggregate_value: Any = None
     numeric_sum = 0.0
     numeric_count = 0
+    combined_bounds: list[float] | None = None
+    geometry_type_counts: Counter[str] = Counter()
 
     batches = starlet.query_dataset(
         payload["dataset_dir"],
@@ -396,6 +410,38 @@ def execute_dataframe_query(payload: dict[str, Any]) -> dict[str, Any]:
             ).dropna()
             numeric_sum += float(numeric.sum())
             numeric_count += int(numeric.count())
+        elif operation == "bounds":
+            for geometry in dataframe_geometries(filtered):
+                bounds = geometry_bounds(geometry)
+                if bounds is None:
+                    continue
+                if combined_bounds is None:
+                    combined_bounds = bounds
+                else:
+                    combined_bounds = [
+                        min(combined_bounds[0], bounds[0]),
+                        min(combined_bounds[1], bounds[1]),
+                        max(combined_bounds[2], bounds[2]),
+                        max(combined_bounds[3], bounds[3]),
+                    ]
+        elif operation == "geometry_type_counts":
+            for geometry in dataframe_geometries(filtered):
+                if geometry is not None and not geometry.is_empty:
+                    geometry_type_counts[str(geometry.geom_type)] += 1
+        elif operation == "geometry_records":
+            geometries = dataframe_geometries(filtered)
+            for position, geometry in enumerate(geometries):
+                if len(rows) >= limit:
+                    break
+                record = {
+                    column: dataframe_json_value(filtered[column].iloc[position])
+                    for column in selected
+                }
+                record["geometry"] = geometry_record_summary(
+                    geometry,
+                    query["geometry_fields"],
+                )
+                rows.append(record)
 
     result: dict[str, Any] = {
         "dataset_id": payload["dataset_id"],
@@ -424,6 +470,54 @@ def execute_dataframe_query(payload: dict[str, Any]) -> dict[str, Any]:
     elif operation == "mean":
         result["attribute"] = aggregate_attribute
         result["value"] = numeric_sum / numeric_count if numeric_count else None
+    elif operation == "bounds":
+        result["crs"] = "EPSG:4326"
+        result["geometry_bounds"] = combined_bounds
+    elif operation == "geometry_type_counts":
+        result["geometry_types"] = dict(sorted(geometry_type_counts.items()))
+    elif operation == "geometry_records":
+        result["columns"] = selected
+        result["geometry_fields"] = query["geometry_fields"]
+        result["crs"] = "EPSG:4326"
+        result["rows"] = rows
+        result["truncated"] = matched > len(rows)
+    return result
+
+
+def dataframe_geometries(frame: Any) -> Any:
+    try:
+        return frame.geometry
+    except (AttributeError, KeyError) as exc:
+        raise ValueError("The selected dataset has no queryable geometry column") from exc
+
+
+def geometry_bounds(geometry: Any) -> list[float] | None:
+    if geometry is None or geometry.is_empty:
+        return None
+    bounds = [float(value) for value in geometry.bounds]
+    return bounds if all(math.isfinite(value) for value in bounds) else None
+
+
+def geometry_record_summary(
+    geometry: Any,
+    fields: list[str],
+) -> dict[str, Any] | None:
+    if geometry is None or geometry.is_empty:
+        return None
+    result: dict[str, Any] = {}
+    if "type" in fields:
+        result["type"] = str(geometry.geom_type)
+    if "bounds" in fields:
+        result["bounds"] = geometry_bounds(geometry)
+    if "centroid" in fields:
+        centroid = geometry.centroid
+        result["centroid"] = (
+            [float(centroid.x), float(centroid.y)]
+            if not centroid.is_empty
+            and math.isfinite(float(centroid.x))
+            and math.isfinite(float(centroid.y))
+            else None
+        )
     return result
 
 
@@ -696,6 +790,8 @@ class AssistantTools:
                 result, actions = self.summarize_viewport(context)
             elif name == "query_dataframe":
                 result, actions = self.query_dataframe(arguments, context)
+            elif name == "focus_feature":
+                result, actions = self.focus_feature(arguments, context)
             elif name == "find_attributes":
                 result, actions = self.find_attributes(arguments, context)
             elif name == "apply_style":
@@ -857,6 +953,77 @@ class AssistantTools:
         )
         return result, []
 
+    def focus_feature(
+        self,
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        dataset = self.context_dataset(arguments, context)
+        viewport = context.get("viewport") or {}
+        bounds = viewport.get("bounds") if isinstance(viewport, dict) else None
+        if not valid_bounds(bounds):
+            raise ValueError("The current viewport is unavailable")
+        attribute = required_text(arguments, "attribute", max_chars=300)
+        require_dataset_attribute(dataset, attribute)
+        if attribute == "_id":
+            raise ValueError("Use feature_id, not focus_feature, for the internal _id")
+        if "value" not in arguments:
+            raise ValueError("value is required")
+        value = dataframe_query_scalar(arguments["value"])
+        color = arguments.get("color", "#ffd54f")
+        if not isinstance(color, str) or not is_hex_color(color):
+            raise ValueError("highlight color must be a hexadecimal color")
+        max_zoom = bounded_number(
+            arguments.get("max_zoom", 19),
+            "max_zoom",
+            minimum=0,
+            maximum=24,
+        )
+        query = normalize_dataframe_query(
+            {
+                "where": [{"attribute": attribute, "operator": "eq", "value": value}],
+                "operation": "bounds",
+                "limit": 2,
+            },
+            dataset,
+        )
+        query_result = self.dataframe_query_runner.run(
+            dataset,
+            [float(item) for item in bounds],
+            query,
+        )
+        matched = query_result.get("matched_features")
+        feature_bounds = query_result.get("geometry_bounds")
+        if matched != 1 or not valid_bounds(feature_bounds):
+            if matched == 0:
+                raise ValueError("No matching feature was found in the current viewport")
+            raise ValueError(
+                "The identity matched more than one feature; use a unique attribute and value"
+            )
+        result = {
+            "dataset_id": dataset["id"],
+            "attribute": attribute,
+            "value": value,
+            "geometry_bounds": [float(item) for item in feature_bounds],
+            "crs": "EPSG:4326",
+        }
+        return result, [
+            {
+                "type": "fit_bounds",
+                "query": f"{attribute}={value}",
+                "label": "matching feature",
+                "bounds": result["geometry_bounds"],
+                "max_zoom": max_zoom,
+            },
+            {
+                "type": "highlight_feature",
+                "dataset_id": dataset["id"],
+                "attribute": attribute,
+                "value": value,
+                "color": color,
+            },
+        ]
+
     def find_attributes(
         self,
         arguments: dict[str, Any],
@@ -928,23 +1095,35 @@ class AssistantTools:
         context: dict[str, Any],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         dataset = self.context_dataset(arguments, context)
-        if (dataset.get("visualization") or {}).get("type") != "VectorTile":
-            raise ValueError("_id highlighting is available only for vector-tile datasets")
-        feature_id = arguments.get("feature_id", context.get("selected_feature_id"))
-        if (
-            not isinstance(feature_id, int)
-            or isinstance(feature_id, bool)
-            or not -(2**53 - 1) <= feature_id <= 2**53 - 1
-        ):
-            raise ValueError("feature_id must be a JavaScript-safe integer")
         color = arguments.get("color", "#ffd54f")
         if not isinstance(color, str) or not is_hex_color(color):
             raise ValueError("highlight color must be a hexadecimal color")
-        result = {
+        result: dict[str, Any] = {
             "dataset_id": dataset["id"],
-            "feature_id": feature_id,
             "color": color,
         }
+        attribute = arguments.get("attribute")
+        if attribute is not None or "value" in arguments:
+            if not isinstance(attribute, str) or not attribute:
+                raise ValueError("attribute is required with a highlight value")
+            require_dataset_attribute(dataset, attribute)
+            if attribute == "_id":
+                raise ValueError("Use feature_id to highlight the internal _id")
+            if "value" not in arguments:
+                raise ValueError("value is required with a highlight attribute")
+            result["attribute"] = attribute
+            result["value"] = dataframe_query_scalar(arguments["value"])
+        else:
+            if (dataset.get("visualization") or {}).get("type") != "VectorTile":
+                raise ValueError("_id highlighting is available only for vector-tile datasets")
+            feature_id = arguments.get("feature_id", context.get("selected_feature_id"))
+            if (
+                not isinstance(feature_id, int)
+                or isinstance(feature_id, bool)
+                or not -(2**53 - 1) <= feature_id <= 2**53 - 1
+            ):
+                raise ValueError("feature_id must be a JavaScript-safe integer")
+            result["feature_id"] = feature_id
         return result, [{"type": "highlight_feature", **result}]
 
     def clear_highlight(
@@ -1115,7 +1294,19 @@ DATAFRAME_QUERY_OPERATORS = {
     "is_null",
     "not_null",
 }
-DATAFRAME_QUERY_OPERATIONS = {"records", "count", "distinct", "min", "max", "mean", "sum"}
+DATAFRAME_QUERY_OPERATIONS = {
+    "records",
+    "count",
+    "distinct",
+    "min",
+    "max",
+    "mean",
+    "sum",
+    "bounds",
+    "geometry_type_counts",
+    "geometry_records",
+}
+DATAFRAME_GEOMETRY_FIELDS = {"type", "bounds", "centroid"}
 
 
 def normalize_dataframe_query(
@@ -1129,6 +1320,7 @@ def normalize_dataframe_query(
         "operation",
         "select",
         "attribute",
+        "geometry_fields",
         "limit",
     }
     if unknown:
@@ -1143,8 +1335,6 @@ def normalize_dataframe_query(
         and str(field.get("role") or "").lower() != "geometry"
         and str(field.get("name")).lower() != "geometry"
     }
-    queryable_attributes.add("_id")
-
     where = arguments.get("where", [])
     if not isinstance(where, list) or len(where) > 10:
         raise ValueError("where must be an array with at most 10 conditions")
@@ -1185,8 +1375,24 @@ def normalize_dataframe_query(
         for attribute in normalized_select:
             require_queryable_attribute(attribute, queryable_attributes)
         result["select"] = normalized_select
+    elif operation == "geometry_records":
+        if select is None:
+            normalized_select = []
+        elif (
+            not isinstance(select, list)
+            or len(select) > 10
+            or any(not isinstance(name, str) or not name for name in select)
+        ):
+            raise ValueError(
+                "geometry_records select must contain at most 10 attributes"
+            )
+        else:
+            normalized_select = list(dict.fromkeys(select))
+        for selected_attribute in normalized_select:
+            require_queryable_attribute(selected_attribute, queryable_attributes)
+        result["select"] = normalized_select
     elif select is not None:
-        raise ValueError("select is supported only for records queries")
+        raise ValueError("select is supported only for records or geometry_records queries")
 
     attribute = arguments.get("attribute")
     if operation in {"distinct", "min", "max", "mean", "sum"}:
@@ -1196,6 +1402,21 @@ def normalize_dataframe_query(
         result["attribute"] = attribute
     elif attribute is not None:
         raise ValueError("attribute is not used by this dataframe query operation")
+
+    geometry_fields = arguments.get("geometry_fields")
+    if operation == "geometry_records":
+        if (
+            not isinstance(geometry_fields, list)
+            or not geometry_fields
+            or len(geometry_fields) > len(DATAFRAME_GEOMETRY_FIELDS)
+            or any(field not in DATAFRAME_GEOMETRY_FIELDS for field in geometry_fields)
+        ):
+            raise ValueError(
+                "geometry_records requires geometry_fields containing type, bounds, or centroid"
+            )
+        result["geometry_fields"] = list(dict.fromkeys(geometry_fields))
+    elif geometry_fields is not None:
+        raise ValueError("geometry_fields is supported only for geometry_records queries")
     return result
 
 
@@ -1402,12 +1623,17 @@ def validate_action(action: dict[str, Any]) -> dict[str, Any]:
     if action_type == "fit_bounds":
         if not valid_bounds(action.get("bounds")):
             raise ValueError("Invalid fit_bounds action")
-        return {
+        result = {
             "type": action_type,
             "query": str(action.get("query") or "")[:300],
             "label": str(action.get("label") or "")[:500],
             "bounds": [float(value) for value in action["bounds"]],
         }
+        if "max_zoom" in action:
+            result["max_zoom"] = bounded_number(
+                action["max_zoom"], "max_zoom", minimum=0, maximum=24
+            )
+        return result
     if action_type == "change_basemap":
         if action.get("basemap") not in {"street", "satellite"}:
             raise ValueError("Invalid change_basemap action")
@@ -1432,23 +1658,38 @@ def validate_action(action: dict[str, Any]) -> dict[str, Any]:
     if action_type == "highlight_feature":
         dataset_id = action.get("dataset_id")
         feature_id = action.get("feature_id")
+        attribute = action.get("attribute")
         color = action.get("color")
         if (
             not isinstance(dataset_id, str)
             or not dataset_id
-            or not isinstance(feature_id, int)
-            or isinstance(feature_id, bool)
-            or not -(2**53 - 1) <= feature_id <= 2**53 - 1
             or not isinstance(color, str)
             or not is_hex_color(color)
         ):
             raise ValueError("Invalid highlight_feature action")
-        return {
+        result: dict[str, Any] = {
             "type": action_type,
             "dataset_id": dataset_id,
-            "feature_id": feature_id,
             "color": color,
         }
+        if attribute is not None or "value" in action:
+            if (
+                not isinstance(attribute, str)
+                or not attribute
+                or "value" not in action
+            ):
+                raise ValueError("Invalid highlight_feature attribute identity")
+            result["attribute"] = attribute
+            result["value"] = dataframe_query_scalar(action["value"])
+        else:
+            if (
+                not isinstance(feature_id, int)
+                or isinstance(feature_id, bool)
+                or not -(2**53 - 1) <= feature_id <= 2**53 - 1
+            ):
+                raise ValueError("Invalid highlight_feature action")
+            result["feature_id"] = feature_id
+        return result
     if action_type == "clear_highlight":
         dataset_id = action.get("dataset_id")
         if not isinstance(dataset_id, str) or not dataset_id:

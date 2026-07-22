@@ -174,16 +174,23 @@ template supports these providers:
 - `ollama`
 - `integrated`
 
-Choose the provider with:
+Enable providers individually and choose the default with:
 
 ```json
 {
   "llm": {
-    "enabled": true,
-    "provider": "integrated"
+    "default": "gemini",
+    "providers": {
+      "gemini": {"enabled": true},
+      "ollama": {"enabled": true},
+      "openai": {"enabled": false}
+    }
   }
 }
 ```
+
+Every enabled provider with valid chat configuration is shown in the browser model selector.
+`default` selects the initial option; it does not disable the others.
 
 For OpenAI and Gemini, prefer environment variables in the config template:
 
@@ -210,10 +217,10 @@ The template is configured to use the integrated provider immediately:
 ```json
 {
   "llm": {
-    "enabled": true,
-    "provider": "integrated",
+    "default": "integrated",
     "providers": {
       "integrated": {
+        "enabled": true,
         "backend": "llama-cpp",
         "model_dir": "models",
         "model_id": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
@@ -248,10 +255,10 @@ process, use the built-in backend:
 ```json
 {
   "llm": {
-    "enabled": true,
-    "provider": "integrated",
+    "default": "integrated",
     "providers": {
       "integrated": {
+        "enabled": true,
         "backend": "builtin",
         "chat_model": "builtin-heuristic",
         "embedding_model": "builtin-hash",
@@ -276,8 +283,9 @@ embedding exists, search falls back to text matching.
 
 The browser discovers chat support from `GET /llm/capabilities.json`. The
 response exposes only public provider/model labels and never returns API keys
-or provider base URLs. The chat button remains disabled when chat is disabled
-or its selected provider is missing required configuration.
+or provider base URLs. The chat button remains disabled when no enabled provider has valid
+chat configuration. Invalid or disabled providers are omitted while other usable providers
+remain available.
 
 Send a message with `POST /llm/chat.json`:
 
@@ -322,14 +330,21 @@ Geocoding endpoint, user agent, and timeout are configured under `llm.geocoding`
 For small, targeted questions about visible records, the assistant can use the
 `query_dataframe` tool. It applies a structured, read-only filter to GeoPandas batches in
 the current viewport and can return selected records, a count, distinct values, or a
-`min`, `max`, `mean`, or `sum`. The tool does not accept Python code or free-form pandas
-expressions. It runs in a dedicated child process with a hard deadline of at most five
-seconds; a timed-out worker is terminated, killed if necessary, and joined before the
-request returns. Feature scans and serialized response bytes are also bounded, and an
-oversized result is reported as a tool failure rather than being sent to the model. The
-limits are configured with `dataframe_query_timeout_seconds`,
+`min`, `max`, `mean`, or `sum`. Geometry-derived operations can return the combined
+EPSG:4326 bounds/MBR, geometry-type counts, or bounded per-feature type, bounds, and
+centroid summaries. Raw geometries are not returned because their coordinate arrays can
+be arbitrarily large. The tool does not accept Python code or free-form pandas expressions.
+It runs in a dedicated child process with a hard deadline of at most five seconds; a timed-out
+worker is terminated, killed if necessary, and joined before the request returns. Feature
+scans and serialized response bytes are also bounded, and an oversized result is reported
+as a tool failure rather than being sent to the model. The limits are configured with
+`dataframe_query_timeout_seconds`,
 `dataframe_query_max_result_bytes`, `dataframe_query_max_scanned_features`, and
 `dataframe_query_batch_size` under `llm.chat` and remain subject to server-side hard caps.
+After a query identifies exactly one record, `focus_feature` can verify it again using a
+real unique dataset attribute, compute its geometry bounds, and return coordinated
+`fit_bounds` and `highlight_feature` actions. Attribute-based highlighting also supports
+legacy vector datasets whose tiles do not expose the internal `_id` field.
 
 Conversational styling returns a validated `apply_style` action containing a complete
 MapLibre v8 dataset style. It supports data expressions, filters, zoom-dependent styling,

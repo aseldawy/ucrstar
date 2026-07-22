@@ -1341,28 +1341,37 @@ function applyLocalStyleDocument(style) {
 }
 
 async function applyFeatureHighlight(action) {
-  if (!action || !Number.isSafeInteger(action.feature_id) || !isHexColor(action.color)) return false;
+  var byFeatureId = action && Number.isSafeInteger(action.feature_id);
+  var byAttribute = action && typeof action.attribute === 'string' && action.attribute && Object.prototype.hasOwnProperty.call(action, 'value');
+  if (!action || (!byFeatureId && !byAttribute) || !isHexColor(action.color)) return false;
   if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) {
     await selectDataset(action.dataset_id, {fitBounds:false});
+  }
+  if (byAttribute) {
+    var requiredAttributes = overlayAttributes();
+    requiredAttributes.push(action.attribute);
+    updateVectorTileAttributes(tileAttributesForStyle(activeDatasetStyle.document, requiredAttributes));
   }
   clearFeatureHighlight();
   var layerSource = (currentDatasetInfo.visualization || {}).type === 'VectorTile'
     ? {'source-layer':sourceLayer}
     : {};
-  var idFilter = ['==', ['get','_id'], action.feature_id];
+  var identityFilter = byAttribute
+    ? ['==', ['get',action.attribute], action.value]
+    : ['==', ['get','_id'], action.feature_id];
   var layers = [
     Object.assign({
       id:'ucrstar-highlight-fill',
       type:'fill',
       source:DATASET_SOURCE,
-      filter:['all', idFilter, ['==',['geometry-type'],'Polygon']],
+      filter:['all', identityFilter, ['==',['geometry-type'],'Polygon']],
       paint:{'fill-color':action.color,'fill-opacity':0.3}
     }, layerSource),
     Object.assign({
       id:'ucrstar-highlight-line',
       type:'line',
       source:DATASET_SOURCE,
-      filter:['all', idFilter, ['any',
+      filter:['all', identityFilter, ['any',
         ['==',['geometry-type'],'Polygon'],
         ['==',['geometry-type'],'LineString']
       ]],
@@ -1372,7 +1381,7 @@ async function applyFeatureHighlight(action) {
       id:'ucrstar-highlight-point',
       type:'circle',
       source:DATASET_SOURCE,
-      filter:['all', idFilter, ['==',['geometry-type'],'Point']],
+      filter:['all', identityFilter, ['==',['geometry-type'],'Point']],
       paint:{
         'circle-color':action.color,
         'circle-opacity':0.95,
@@ -1480,6 +1489,7 @@ function overlayAttributes(){
   var attributes = [];
   if (_labelConfig && _labelConfig.attribute) attributes.push(_labelConfig.attribute);
   if (_pointIconConfig && _pointIconConfig.attribute) attributes.push(_pointIconConfig.attribute);
+  if (currentHighlight && currentHighlight.attribute) attributes.push(currentHighlight.attribute);
   return attributes;
 }
 function refreshOverlayTileAttributes(){
@@ -1942,9 +1952,11 @@ function escapeHtml(value){
 
 (function(){
   var SESSION_STORAGE_KEY = 'ucrstar-ai-session-id';
+  var MODEL_STORAGE_KEY = 'ucrstar-ai-model-id';
   var _available = false;
   var _busy = false;
   var _sessionId = loadSavedSession();
+  var _modelId = loadSavedModel();
 
   function addMsg(type, content){
     var box = document.getElementById('aiMsgs');
@@ -1989,11 +2001,23 @@ function escapeHtml(value){
     try { return localStorage.getItem(SESSION_STORAGE_KEY); } catch(e) { return null; }
   }
 
+  function loadSavedModel(){
+    try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch(e) { return null; }
+  }
+
   function saveSession(sessionId){
     _sessionId = sessionId || null;
     try {
       if (_sessionId) localStorage.setItem(SESSION_STORAGE_KEY, _sessionId);
       else localStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch(e) {}
+  }
+
+  function saveModel(modelId){
+    _modelId = modelId || null;
+    try {
+      if (_modelId) localStorage.setItem(MODEL_STORAGE_KEY, _modelId);
+      else localStorage.removeItem(MODEL_STORAGE_KEY);
     } catch(e) {}
   }
 
@@ -2034,11 +2058,24 @@ function escapeHtml(value){
     (capabilities.models || []).forEach(function(model){
       var option = document.createElement('option');
       option.value = model.id;
+      option.dataset.provider = model.provider || '';
       option.textContent = model.label + (model.provider ? ' · ' + model.provider : '');
       select.appendChild(option);
     });
-    if (capabilities.default_model) select.value = capabilities.default_model;
+    var availableModelIds = (capabilities.models || []).map(function(model){ return model.id; });
+    select.value = _modelId && availableModelIds.indexOf(_modelId) !== -1
+      ? _modelId
+      : (capabilities.default_model || '');
+    saveModel(select.value);
     select.disabled = !_available || select.options.length <= 1;
+    updateSelectedModelSubtitle();
+  }
+
+  function updateSelectedModelSubtitle(){
+    var select = document.getElementById('aiModelSelect');
+    var sub = document.getElementById('aiHeadSub');
+    var selected = select && select.options[select.selectedIndex];
+    if (sub && _available) sub.textContent = ((selected && selected.dataset.provider) || 'Server') + ' · server managed';
   }
 
   async function initialize(){
@@ -2047,9 +2084,8 @@ function escapeHtml(value){
       setAvailable(capabilities.available, capabilities.reason);
       populateModels(capabilities);
       var sub = document.getElementById('aiHeadSub');
-      var model = (capabilities.models || []).find(function(item){ return item.id === capabilities.default_model; });
       if (sub) sub.textContent = capabilities.available
-        ? ((model && model.provider) || 'Server') + ' · server managed'
+        ? sub.textContent
         : 'Unavailable';
       replaceMessages(
         capabilities.available ? 'info' : 'err',
@@ -2144,6 +2180,10 @@ function escapeHtml(value){
       }
       if (!data || !data.message) throw new Error('The server returned an invalid chat response');
       saveSession(data.session_id);
+      if (thinking) {
+        thinking.remove();
+        thinking = null;
+      }
       addMsg('bot', assistantMessageText(data.message.content));
       await handleActions(data.actions || []);
     } catch(e) {
@@ -2174,10 +2214,9 @@ function escapeHtml(value){
         await selectDataset(action.dataset_id);
         applied.push('Dataset selected');
       } else if (action.type === 'fit_bounds' && validActionBounds(action.bounds)) {
-        await waitForMapLoad();
         map.fitBounds(
           [[action.bounds[0], action.bounds[1]], [action.bounds[2], action.bounds[3]]],
-          {padding:70, maxZoom:12, duration:600}
+          {padding:70, maxZoom:validActionZoom(action.max_zoom, 12), duration:600}
         );
         applied.push(action.label ? 'Map moved to '+action.label : 'Map view updated');
       } else if (action.type === 'change_basemap' && ['street','satellite'].indexOf(action.basemap) !== -1) {
@@ -2196,7 +2235,12 @@ function escapeHtml(value){
         resetStyleToServerDefault();
         applied.push('Server-default style restored');
       } else if (action.type === 'highlight_feature') {
-        if (await applyFeatureHighlight(action)) applied.push('Feature '+action.feature_id+' highlighted');
+        if (await applyFeatureHighlight(action)) {
+          var featureLabel = Number.isSafeInteger(action.feature_id)
+            ? action.feature_id
+            : action.attribute+'='+String(action.value);
+          applied.push('Feature '+featureLabel+' highlighted');
+        }
       } else if (action.type === 'clear_highlight') {
         if (!currentDatasetInfo || String(currentDatasetInfo.id || currentDatasetInfo.name) !== String(action.dataset_id)) continue;
         clearFeatureHighlight();
@@ -2232,6 +2276,12 @@ function escapeHtml(value){
       && bounds.every(function(value){ return typeof value === 'number' && Number.isFinite(value); });
   }
 
+  function validActionZoom(value, fallback){
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 24
+      ? value
+      : fallback;
+  }
+
   function resetChat(){
     saveSession(null);
     replaceMessages('info', 'New chat. A session will be created with your next message.');
@@ -2244,6 +2294,10 @@ function escapeHtml(value){
   if (fab) fab.addEventListener('click', window.aiToggle);
   if (aiIn) aiIn.addEventListener('keydown', function(e){ if (e.key === 'Enter') window.aiSend(); });
   if (reset) reset.addEventListener('click', resetChat);
-  if (modelSelect) modelSelect.addEventListener('change', resetChat);
+  if (modelSelect) modelSelect.addEventListener('change', function(){
+    saveModel(modelSelect.value);
+    updateSelectedModelSubtitle();
+    resetChat();
+  });
   initialize();
 })();

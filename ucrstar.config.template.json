@@ -1,7 +1,6 @@
 {
   "llm": {
-    "enabled": true,
-    "provider": "integrated",
+    "default": "integrated",
     "max_description_chars": 250,
     "semantic_search": true,
     "search_limit": 20,
@@ -33,23 +32,27 @@
     },
     "providers": {
       "openai": {
+        "enabled": false,
         "api_key": "${OPENAI_API_KEY}",
         "base_url": "https://api.openai.com/v1",
         "chat_model": "gpt-4o-mini",
         "embedding_model": "text-embedding-3-small"
       },
       "gemini": {
+        "enabled": false,
         "api_key": "${GEMINI_API_KEY}",
         "base_url": "https://generativelanguage.googleapis.com/v1beta",
         "chat_model": "gemini-1.5-flash",
         "embedding_model": "gemini-embedding-2"
       },
       "ollama": {
+        "enabled": false,
         "base_url": "http://127.0.0.1:11434",
         "chat_model": "llama3.1",
         "embedding_model": "nomic-embed-text"
       },
       "integrated": {
+        "enabled": true,
         "backend": "llama-cpp",
         "model_dir": "models",
         "model_id": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
