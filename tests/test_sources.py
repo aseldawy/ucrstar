@@ -44,6 +44,73 @@ def test_source_reference_for_remote_file_uses_http_timestamp(monkeypatch) -> No
     assert source["metadata"]["content_length"] == "42"
 
 
+def test_source_reference_for_multiple_remote_files(monkeypatch) -> None:
+    def fake_head_url(url):
+        filename = Path(url).name
+        return {
+            "Last-Modified": "Tue, 30 Jun 2026 06:24:35 GMT"
+            if filename == "roads.geojson"
+            else "Wed, 01 Jul 2026 06:24:35 GMT",
+            "Content-Type": "application/geo+json",
+            "Content-Length": "42",
+        }
+
+    monkeypatch.setattr(sources, "head_url", fake_head_url)
+
+    source = sources.source_reference(
+        "https://example.com/data/roads.geojson\n"
+        "https://example.com/data/parks.geojson"
+    )
+
+    assert source["type"] == "multi_remote_file"
+    assert source["url"] == (
+        "https://example.com/data/roads.geojson\n"
+        "https://example.com/data/parks.geojson"
+    )
+    assert source["modified_at"] == "2026-07-01T06:24:35+00:00"
+    assert source["metadata"]["file_count"] == 2
+    assert [file["filename"] for file in source["metadata"]["files"]] == [
+        "roads.geojson",
+        "parks.geojson",
+    ]
+
+
+def test_prepare_input_source_downloads_multiple_remote_files(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sources,
+        "head_url",
+        lambda url: {
+            "Last-Modified": "Tue, 30 Jun 2026 06:24:35 GMT",
+            "Content-Type": "application/geo+json",
+            "Content-Length": "42",
+        },
+    )
+
+    def fake_download_url(url, target):
+        target.write_text(url, encoding="utf-8")
+
+    monkeypatch.setattr(sources, "download_url", fake_download_url)
+
+    prepared = sources.prepare_input_source(
+        "https://example.com/data/roads.geojson\n"
+        "https://example.com/data/parks.geojson"
+    )
+    try:
+        assert prepared.path.is_dir()
+        assert sorted(path.name for path in prepared.path.iterdir()) == [
+            "parks.geojson",
+            "roads.geojson",
+        ]
+        assert prepared.source["type"] == "multi_remote_file"
+        assert prepared.source["metadata"]["downloaded_path"] == str(prepared.path)
+        assert all(
+            Path(file["downloaded_path"]).exists()
+            for file in prepared.source["metadata"]["files"]
+        )
+    finally:
+        prepared.cleanup()
+
+
 def test_fetch_json_encodes_url_path_spaces_and_preserves_query(monkeypatch) -> None:
     captured = {}
 

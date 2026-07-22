@@ -67,7 +67,7 @@ def main() -> None:
         aliases=["add-datasets"],
         help="Build a Starlet dataset and add it to the catalog.",
     )
-    add_dataset.add_argument("input_path")
+    add_dataset.add_argument("input_path", nargs="+")
     add_dataset.add_argument("--name")
     add_dataset.add_argument(
         "--description",
@@ -194,11 +194,12 @@ def main() -> None:
     catalog = DatasetCatalog(args.database, args.datasets_dir)
 
     if args.command in {"add-dataset", "add-datasets"}:
-        LOGGER.info("Adding dataset from %s", args.input_path)
-        if is_ezesri_catalog_url(args.input_path) or is_esri_hub_repository_url(args.input_path):
+        input_source = combined_input_source(args.input_path)
+        LOGGER.info("Adding dataset from %s", input_source)
+        if is_ezesri_catalog_url(input_source) or is_esri_hub_repository_url(input_source):
             added = add_dataset_from_source(
                 catalog,
-                args.input_path,
+                input_source,
                 args.name,
                 args.datasets_dir,
                 args.overwrite,
@@ -209,17 +210,17 @@ def main() -> None:
             LOGGER.info("Added %d dataset(s).", len(added) if isinstance(added, list) else 1)
             return
         source_metadata = source_metadata_from_args(args)
-        source = apply_source_metadata(registration_source(args.input_path), source_metadata)
+        source = apply_source_metadata(registration_source(input_source), source_metadata)
         existing = find_dataset_by_source(catalog, source)
         if existing is None:
-            candidate_name = args.name or dataset_name_from_source(source, source_name_path(args.input_path, source))
+            candidate_name = args.name or dataset_name_from_source(source, source_name_path(input_source, source))
             existing = catalog.get(candidate_name)
         if existing is not None:
-            log_existing_dataset_skip(args.input_path, existing)
+            log_existing_dataset_skip(input_source, existing)
             return
         added = add_dataset_from_source(
             catalog,
-            args.input_path,
+            input_source,
             args.name,
             args.datasets_dir,
             args.overwrite,
@@ -320,6 +321,14 @@ def server_url(host: str, port: int) -> str:
     if ":" in display_host and not display_host.startswith("["):
         display_host = f"[{display_host}]"
     return f"http://{display_host}:{port}/"
+
+
+def combined_input_source(values: list[str]) -> str:
+    if len(values) == 1:
+        return values[0]
+    if any(is_ezesri_catalog_url(value) or is_esri_hub_repository_url(value) for value in values):
+        raise SystemExit("Repository imports accept exactly one input URL.")
+    return "\n".join(values)
 
 
 def add_build_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1067,7 +1076,7 @@ def process_registered_dataset(
         if prepared.source.get("type") != "local" and prepared.source.get("url") == source_url:
             catalog.update_state(dataset["id"], "downloaded")
         build_dataset(prepared.path, datasets_dir, dataset["name"], True, build_kwargs)
-        if prepared.source.get("type") != "local" and prepared.path.parent.name != "download":
+        if prepared.source.get("type") != "local" and not prepared_path_is_cached_download(dataset_dir, prepared.path):
             persist_source_copy(dataset_dir, prepared)
         write_source_summary(dataset_dir, prepared.source)
         catalog.sync()
@@ -1367,14 +1376,14 @@ def refresh_dataset(
     name = dataset["name"]
     temp_name = f"{name}__refresh_{uuid.uuid4().hex[:12]}"
     backup_name = f"{name}__backup_{uuid.uuid4().hex[:12]}"
-    temp_dir = datasets_root / temp_name
-    backup_dir = datasets_root / backup_name
-    dataset_dir = datasets_root / name
+    temp_dir = datasets_root / dataset_relative_path(temp_name)
+    backup_dir = datasets_root / dataset_relative_path(backup_name)
+    dataset_dir = datasets_root / dataset_relative_path(name)
 
     try:
         prepared = prepare_dataset_source(dataset_dir, source_url, dataset.get("source") or {})
         try:
-            if prepared.source.get("type") != "local" and prepared.path.parent.name != "download":
+            if prepared.source.get("type") != "local" and not prepared_path_is_cached_download(dataset_dir, prepared.path):
                 persist_source_copy(dataset_dir, prepared)
             build_dataset(prepared.path, datasets_root, temp_name, True, build_kwargs)
             write_source_summary(temp_dir, prepared.source)
@@ -1412,6 +1421,13 @@ def swap_dataset_dirs(dataset_dir: Path, temp_dir: Path, backup_dir: Path) -> No
         if backup_dir.exists() and not dataset_dir.exists():
             backup_dir.rename(dataset_dir)
         raise
+
+
+def prepared_path_is_cached_download(dataset_dir: Path, prepared_path: Path) -> bool:
+    try:
+        return prepared_path.resolve() == (dataset_dir / "download").resolve()
+    except OSError:
+        return False
 
 
 def cleanup_dataset_dir(datasets_dir: Path, name: str) -> None:
@@ -1463,6 +1479,8 @@ def cached_download_path(dataset_dir: Path, source: dict[str, Any]) -> Path | No
     download_dir = dataset_dir / "download"
     if not download_dir.exists():
         return None
+    if source.get("type") == "multi_remote_file":
+        return download_dir if any(download_dir.iterdir()) else None
     metadata = source.get("metadata") or {}
     candidates = []
     filename = metadata.get("filename")
@@ -1672,6 +1690,18 @@ def persist_source_copy(dataset_dir: Path, prepared: Any) -> None:
 
     source_name = Path(source_path).name
     destination = download_dir / source_name
+    if Path(source_path).is_dir():
+        for child in Path(source_path).iterdir():
+            if not child.is_file():
+                continue
+            destination = download_dir / child.name
+            if destination.exists():
+                if destination.is_dir():
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink()
+            shutil.copy2(child, destination)
+        return
     if destination.exists():
         if destination.is_dir():
             shutil.rmtree(destination)

@@ -58,33 +58,80 @@ class PreparedSource:
 
 
 def prepare_input_source(value: str) -> PreparedSource:
+    if is_multi_url(value):
+        return prepare_multi_remote_files(value)
     if is_url(value):
         return prepare_remote_source(value)
     return prepare_local_source(value)
 
 
 def source_reference(value: str) -> dict[str, Any]:
+    if is_multi_url(value):
+        return multi_remote_source_reference(value)
     if is_url(value):
         return remote_source_reference(value)
     return prepare_local_source(value).source
 
 
-def remote_source_reference(url: str) -> dict[str, Any]:
+def split_source_urls(value: str) -> list[str]:
+    return [line.strip() for line in value.splitlines() if line.strip()]
+
+
+def is_multi_url(value: str) -> bool:
+    urls = split_source_urls(value)
+    return len(urls) > 1 and all(is_url(url) for url in urls)
+
+
+def multi_remote_source_reference(value: str) -> dict[str, Any]:
+    urls = split_source_urls(value)
+    files = [remote_file_metadata(url) for url in urls]
+    modified_values = [
+        file_metadata.get("modified_at")
+        for file_metadata in files
+        if file_metadata.get("modified_at")
+    ]
+    return {
+        "type": "multi_remote_file",
+        "url": "\n".join(urls),
+        "accessed_at": utc_now_iso(),
+        "modified_at": max(modified_values) if modified_values else None,
+        "metadata": {
+            "urls": urls,
+            "files": files,
+            "file_count": len(files),
+        },
+    }
+
+
+def remote_file_metadata(url: str) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
     headers = head_url(url)
     filename = filename_from_url_or_headers(url, headers)
     return {
+        "url": url,
+        "path": parsed.path,
+        "netloc": parsed.netloc,
+        "filename": filename,
+        "content_type": headers.get("Content-Type"),
+        "content_length": headers.get("Content-Length"),
+        "modified_at": timestamp_from_http(headers.get("Last-Modified")),
+    }
+
+
+def remote_source_reference(url: str) -> dict[str, Any]:
+    metadata = remote_file_metadata(url)
+    return {
         "type": "remote_file",
         "url": url,
         "accessed_at": utc_now_iso(),
-        "modified_at": timestamp_from_http(headers.get("Last-Modified")),
+        "modified_at": metadata.get("modified_at"),
         "metadata": {
-            "url": url,
-            "path": parsed.path,
-            "netloc": parsed.netloc,
-            "filename": filename,
-            "content_type": headers.get("Content-Type"),
-            "content_length": headers.get("Content-Length"),
+            "url": metadata["url"],
+            "path": metadata["path"],
+            "netloc": metadata["netloc"],
+            "filename": metadata["filename"],
+            "content_type": metadata.get("content_type"),
+            "content_length": metadata.get("content_length"),
         },
     }
 
@@ -200,6 +247,49 @@ def prepare_remote_file(url: str) -> PreparedSource:
     )
 
 
+def prepare_multi_remote_files(value: str) -> PreparedSource:
+    reference = multi_remote_source_reference(value)
+    tempdir = tempfile.TemporaryDirectory(prefix="ucrstar-sources-")
+    target_dir = Path(tempdir.name)
+    downloaded_files = []
+    used_names: set[str] = set()
+    for index, file_metadata in enumerate(reference["metadata"]["files"], start=1):
+        filename = unique_download_filename(
+            str(file_metadata.get("filename") or f"dataset-{index}.geojson"),
+            used_names,
+        )
+        target = target_dir / filename
+        LOGGER.info("Downloading remote dataset part %s to %s", file_metadata["url"], target)
+        download_url(file_metadata["url"], target)
+        downloaded = {**file_metadata, "downloaded_path": str(target)}
+        downloaded_files.append(downloaded)
+    return PreparedSource(
+        path=target_dir,
+        source={
+            **reference,
+            "metadata": {
+                **reference["metadata"],
+                "files": downloaded_files,
+                "downloaded_path": str(target_dir),
+            },
+        },
+        _tempdir=tempdir,
+    )
+
+
+def unique_download_filename(filename: str, used_names: set[str]) -> str:
+    safe_name = safe_filename(filename) or "dataset.geojson"
+    stem = Path(safe_name).stem or "dataset"
+    suffix = Path(safe_name).suffix
+    candidate = safe_name
+    index = 2
+    while candidate in used_names:
+        candidate = f"{stem}_{index}{suffix}"
+        index += 1
+    used_names.add(candidate)
+    return candidate
+
+
 def prepare_arcgis_service(
     service_url: str,
     *,
@@ -247,6 +337,14 @@ def current_source_state(source: dict[str, Any]) -> dict[str, Any]:
 
     if source_type == "remote_file" and url:
         current = remote_source_reference(url)
+        current["metadata"] = {
+            **metadata,
+            **current.get("metadata", {}),
+        }
+        return current
+
+    if source_type == "multi_remote_file" and url:
+        current = multi_remote_source_reference(url)
         current["metadata"] = {
             **metadata,
             **current.get("metadata", {}),

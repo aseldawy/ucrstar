@@ -1084,6 +1084,225 @@ def test_process_dataset_downloads_remote_source_to_temporary_path(
     assert dataset["source"]["modified_at"] == "2026-06-30T06:24:35+00:00"
 
 
+def test_process_dataset_downloads_multiple_remote_sources_to_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = {}
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    urls = "https://example.com/data/roads.geojson\nhttps://example.com/data/parks.geojson"
+
+    def fake_prepare_input_source(value):
+        tempdir = tempfile.TemporaryDirectory(prefix="ucrstar-test-")
+        source_dir = Path(tempdir.name)
+        (source_dir / "roads.geojson").write_text("roads", encoding="utf-8")
+        (source_dir / "parks.geojson").write_text("parks", encoding="utf-8")
+        return PreparedSource(
+            path=source_dir,
+            source={
+                "type": "multi_remote_file",
+                "url": value,
+                "accessed_at": "2026-07-01T00:00:00+00:00",
+                "modified_at": "2026-06-30T06:24:35+00:00",
+                "metadata": {
+                    "urls": value.splitlines(),
+                    "downloaded_path": str(source_dir),
+                    "files": [
+                        {"url": value.splitlines()[0], "filename": "roads.geojson"},
+                        {"url": value.splitlines()[1], "filename": "parks.geojson"},
+                    ],
+                },
+            },
+            _tempdir=tempdir,
+        )
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        source_path = Path(input_arg)
+        calls["input_arg"] = input_arg
+        calls["name"] = kwargs["name"]
+        assert source_path.is_dir()
+        assert sorted(path.name for path in source_path.iterdir()) == [
+            "parks.geojson",
+            "roads.geojson",
+        ]
+        (Path(datasets_arg) / kwargs["name"]).mkdir(parents=True)
+        return None, None, None
+
+    monkeypatch.setattr(cli, "prepare_input_source", fake_prepare_input_source)
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(
+        cli.starlet,
+        "list_datasets",
+        lambda root: sorted(path.name for path in Path(root).iterdir() if path.is_dir()) if Path(root).exists() else [],
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": Path(dataset).name,
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads and parks",
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    catalog.register_source(
+        "osm",
+        {
+            "type": "multi_remote_file",
+            "url": urls,
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": "2026-06-29T00:00:00+00:00",
+            "metadata": {"file_count": 2},
+        },
+        overwrite=True,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "process-dataset",
+            "osm",
+        ],
+    )
+
+    cli.main()
+
+    dataset = catalog.get("osm")
+    assert calls["name"] == "osm"
+    assert Path(calls["input_arg"]).name.startswith("ucrstar-test-")
+    assert sorted(path.name for path in datasets_dir.joinpath("osm", "download").iterdir()) == [
+        "parks.geojson",
+        "roads.geojson",
+    ]
+    assert dataset["dataset_state"] == "published"
+    assert dataset["source"]["type"] == "multi_remote_file"
+    assert dataset["source"]["url"] == urls
+    assert dataset["source"]["modified_at"] == "2026-06-30T06:24:35+00:00"
+
+
+def test_add_dataset_accepts_multiple_input_urls(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = {}
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    roads_url = "https://example.com/data/roads.geojson"
+    parks_url = "https://example.com/data/parks.geojson"
+    combined = f"{roads_url}\n{parks_url}"
+
+    def fake_source_reference(value):
+        calls["registered_source_value"] = value
+        return {
+            "type": "multi_remote_file",
+            "url": value,
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": "2026-06-30T06:24:35+00:00",
+            "metadata": {"urls": value.splitlines(), "file_count": 2},
+        }
+
+    def fake_prepare_input_source(value):
+        calls["prepared_source_value"] = value
+        tempdir = tempfile.TemporaryDirectory(prefix="ucrstar-test-")
+        source_dir = Path(tempdir.name)
+        (source_dir / "roads.geojson").write_text("roads", encoding="utf-8")
+        (source_dir / "parks.geojson").write_text("parks", encoding="utf-8")
+        return PreparedSource(
+            path=source_dir,
+            source={
+                "type": "multi_remote_file",
+                "url": value,
+                "accessed_at": "2026-07-01T00:00:00+00:00",
+                "modified_at": "2026-06-30T06:24:35+00:00",
+                "metadata": {"urls": value.splitlines(), "downloaded_path": str(source_dir)},
+            },
+            _tempdir=tempdir,
+        )
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        calls["input_arg"] = input_arg
+        calls["name"] = kwargs["name"]
+        assert Path(input_arg).is_dir()
+        (Path(datasets_arg) / kwargs["name"]).mkdir(parents=True)
+        return None, None, None
+
+    monkeypatch.setattr(cli, "source_reference", fake_source_reference)
+    monkeypatch.setattr(cli, "prepare_input_source", fake_prepare_input_source)
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(
+        cli.starlet,
+        "list_datasets",
+        lambda root: sorted(path.name for path in Path(root).iterdir() if path.is_dir()) if Path(root).exists() else [],
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": Path(dataset).name,
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "OSM layers",
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            roads_url,
+            parks_url,
+            "--name",
+            "osm",
+        ],
+    )
+
+    cli.main()
+
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("osm")
+    assert calls["registered_source_value"] == combined
+    assert calls["prepared_source_value"] == combined
+    assert calls["name"] == "osm"
+    assert dataset["source"]["url"] == combined
+    assert dataset["dataset_state"] == "published"
+
+
 def test_delete_dataset_removes_folder_and_catalog_entry(
     tmp_path: Path,
     monkeypatch,

@@ -48,6 +48,7 @@ CLI commands log progress to the console at `INFO` level by default. Use
 ```bash
 .venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads
 .venv/bin/python src/ucrstar/cli.py add-dataset https://example.com/data/roads.geojson --name roads
+.venv/bin/python src/ucrstar/cli.py add-dataset https://example.com/roads.geojson https://example.com/parks.geojson --name osm21
 .venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads --create-only
 .venv/bin/python src/ucrstar/cli.py add-dataset path/to/source.geojson --name roads --schema-doc roads.metadata.json
 .venv/bin/python src/ucrstar/cli.py add-dataset https://egis-lacounty.hub.arcgis.com/search --create-only
@@ -58,12 +59,21 @@ The input can be a local path, a direct public download URL, an ArcGIS item URL,
 an Esri Hub dataset URL, an Esri Hub repository/search URL, an ezesri
 `catalog.json` URL, or a public ArcGIS FeatureServer layer URL. Local paths are
 processed directly. Direct public URLs are downloaded to a temporary directory
-and then passed to Starlet:
+and then passed to Starlet. Multiple direct public file URLs can be supplied in
+one command; the server joins them internally, downloads all of them into one
+temporary directory, and passes that directory to Starlet as a single dataset
+input. A stored source can also contain newline-separated URLs, which is how the
+multi-file source is represented in the catalog:
 
 ```bash
 .venv/bin/python src/ucrstar/cli.py add-dataset \
   "https://hub.arcgis.com/datasets/example::roads/about" \
   --name roads
+
+.venv/bin/python src/ucrstar/cli.py add-dataset \
+  https://example.com/roads.geojson \
+  https://example.com/parks.geojson \
+  --name osm21
 ```
 
 For remote Esri sources, the command resolves the dataset metadata. Public
