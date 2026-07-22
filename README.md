@@ -178,6 +178,11 @@ uses the local file or directory modification time. For Esri sources, this uses
 ArcGIS item or layer modification metadata when available. For direct remote
 files, this uses the HTTP `Last-Modified` header when available.
 
+Downloaded remote inputs are kept under each dataset's `download/` subfolder by
+default. On refresh, UCR Star reuses the cached file or multi-file download
+directory when the cache timestamp is current, avoiding another download before
+passing the cached path to Starlet.
+
 Refresh builds the replacement under a temporary dataset name first. If the
 build succeeds, it swaps the new dataset directory into place while preserving
 the existing dataset ID and name, then updates the catalog source metadata. If

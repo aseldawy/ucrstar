@@ -1383,9 +1383,14 @@ def refresh_dataset(
     try:
         prepared = prepare_dataset_source(dataset_dir, source_url, dataset.get("source") or {})
         try:
-            if prepared.source.get("type") != "local" and not prepared_path_is_cached_download(dataset_dir, prepared.path):
+            if (
+                prepared.source.get("type") != "local"
+                and not prepared_path_is_cached_download(dataset_dir, prepared.path)
+            ):
                 persist_source_copy(dataset_dir, prepared)
             build_dataset(prepared.path, datasets_root, temp_name, True, build_kwargs)
+            if prepared.source.get("type") != "local":
+                persist_source_copy(temp_dir, prepared)
             write_source_summary(temp_dir, prepared.source)
             swap_dataset_dirs(dataset_dir, temp_dir, backup_dir)
             cleanup_dataset_dir(datasets_root, backup_name)
@@ -1425,8 +1430,11 @@ def swap_dataset_dirs(dataset_dir: Path, temp_dir: Path, backup_dir: Path) -> No
 
 def prepared_path_is_cached_download(dataset_dir: Path, prepared_path: Path) -> bool:
     try:
-        return prepared_path.resolve() == (dataset_dir / "download").resolve()
+        prepared_path.resolve().relative_to((dataset_dir / "download").resolve())
+        return True
     except OSError:
+        return False
+    except ValueError:
         return False
 
 
@@ -1713,6 +1721,14 @@ def persist_source_copy(dataset_dir: Path, prepared: Any) -> None:
 def timestamp_from_path(path: Path | None) -> datetime | None:
     if path is None or not path.exists():
         return None
+    if path.is_dir():
+        timestamps = [
+            child.stat().st_mtime
+            for child in path.rglob("*")
+            if child.exists()
+        ]
+        if timestamps:
+            return datetime.fromtimestamp(max(timestamps), tz=timezone.utc)
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
 
 
