@@ -190,8 +190,7 @@ class DatasetCatalog:
         """Read Starlet dataset directories and upsert their metadata into SQLite."""
         self.init_db()
         synced: list[dict[str, Any]] = []
-        names = starlet.list_datasets(self.datasets_dir)
-        LOGGER.info("Discovered %d dataset directorie(s) in %s", len(names), self.datasets_dir)
+        discovered_names = list(starlet.list_datasets(self.datasets_dir))
 
         with self.connect() as conn:
             default_repository = self.default_repository()
@@ -199,7 +198,14 @@ class DatasetCatalog:
                 row["name"]: (row["id"], row["repository_id"])
                 for row in conn.execute("SELECT id, repository_id, name FROM datasets")
             }
-            for name in names:
+            names = set(discovered_names)
+            for name in known:
+                dataset_dir = self.datasets_dir / dataset_relative_path(name)
+                if dataset_dir.exists():
+                    names.add(name)
+            sorted_names = sorted(names)
+            LOGGER.info("Discovered %d dataset directorie(s) in %s", len(sorted_names), self.datasets_dir)
+            for name in sorted_names:
                 validate_dataset_name(name)
                 existing = known.get(name)
                 dataset_id = existing[0] if existing else str(uuid.uuid4())

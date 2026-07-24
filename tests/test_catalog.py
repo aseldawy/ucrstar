@@ -85,6 +85,66 @@ def test_catalog_sync_accepts_nested_dataset_names(tmp_path: Path, monkeypatch) 
     assert seen_paths == [datasets_dir / "osm21" / "roads"]
 
 
+def test_catalog_sync_refreshes_registered_nested_dataset_even_if_starlet_listing_is_shallow(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    dataset_dir = datasets_dir / "NE" / "lakes"
+    dataset_dir.mkdir(parents=True)
+    db_path = tmp_path / "catalog.sqlite"
+    seen_paths = []
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["NE"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: seen_paths.append(Path(dataset))
+        or {
+            "name": "lakes",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10 * 1024 * 1024,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": False,
+            "has_pmtiles": True,
+            "mvt_tile_count": 12,
+            "max_zoom": 19,
+        },
+    )
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "description": "Nested lakes",
+            "geometry": [{"geom_types": {"Polygon": 4}, "total_points": 20}],
+            "attributes": [],
+        },
+    )
+
+    catalog = DatasetCatalog(db_path, datasets_dir)
+    registered = catalog.register_source(
+        "NE/lakes",
+        {
+            "type": "remote_file",
+            "url": "https://example.com/lakes.geojson",
+            "accessed_at": "2026-07-24T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {"filename": "lakes.geojson"},
+        },
+        overwrite=True,
+    )
+
+    synced = catalog.sync()
+    detail = catalog.get(registered["id"])
+
+    assert [dataset["name"] for dataset in synced] == ["NE/lakes"]
+    assert seen_paths == [dataset_dir]
+    assert detail["visualization"]["type"] == "VectorTile"
+    assert detail["visualization"]["url"] == (
+        f"/datasets/{registered['id']}/tiles" + "/{z}/{x}/{y}.mvt"
+    )
+    assert detail["visualization"]["max_zoom"] == 19
+
+
 def test_catalog_sync_merges_metadata_without_deleting_existing_keys(
     tmp_path: Path, monkeypatch
 ) -> None:
