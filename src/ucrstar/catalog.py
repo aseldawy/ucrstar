@@ -150,6 +150,12 @@ LIST_COLUMNS = [
     "mbr",
     "dataset_state",
     "error_message",
+    "schema_json",
+    "source_type",
+    "source_url",
+    "source_accessed_at",
+    "source_modified_at",
+    "source_metadata_json",
 ]
 
 

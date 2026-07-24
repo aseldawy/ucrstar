@@ -355,7 +355,21 @@ def source_metadata_from_args(args: argparse.Namespace) -> dict[str, Any] | None
         metadata.update(load_schema_doc(args.schema_doc))
     if getattr(args, "description", None):
         metadata["description"] = clean_text(args.description)
+    csv_options = csv_options_from_args(args)
+    if csv_options:
+        metadata["csv_options"] = csv_options
     return metadata or None
+
+
+def csv_options_from_args(args: argparse.Namespace) -> dict[str, int] | None:
+    options: dict[str, int] = {}
+    if getattr(args, "csv_x_index", None) is not None:
+        options["--csv-x-index"] = int(args.csv_x_index)
+    if getattr(args, "csv_y_index", None) is not None:
+        options["--csv-y-index"] = int(args.csv_y_index)
+    if getattr(args, "csv_wkt_index", None) is not None:
+        options["--csv-wkt-index"] = int(args.csv_wkt_index)
+    return options or None
 
 
 def load_schema_doc(path: Path) -> dict[str, Any]:
@@ -1670,6 +1684,19 @@ def record_dataset_error(catalog: DatasetCatalog, dataset: dict[str, Any], exc: 
 
 
 def write_dataset_list(datasets: list[dict[str, Any]], output_format: str) -> None:
+    if output_format == "json":
+        rows = [
+            {
+                "name": dataset.get("name"),
+                "id": dataset.get("id"),
+                "status": dataset.get("dataset_state"),
+                "size": dataset.get("size_bytes"),
+                "options": dataset_options_text(dataset),
+            }
+            for dataset in datasets
+        ]
+        print(json.dumps(rows, indent=2))
+        return
     rows = [
         {
             "name": dataset.get("name"),
@@ -1679,9 +1706,6 @@ def write_dataset_list(datasets: list[dict[str, Any]], output_format: str) -> No
         }
         for dataset in datasets
     ]
-    if output_format == "json":
-        print(json.dumps(rows, indent=2))
-        return
     if output_format == "csv":
         writer = csv.DictWriter(sys.stdout, fieldnames=["name", "id", "status", "size"])
         writer.writeheader()
@@ -1695,7 +1719,7 @@ def write_dataset_list(datasets: list[dict[str, Any]], output_format: str) -> No
         status = str(row["status"])
         status_counts[status] = status_counts.get(status, 0) + 1
     widths = {
-        "name": max(len("name"), *(len(str(row["name"])) for row in rows)),
+        "name": 20,
         "id": max(len("id"), *(len(str(row["id"])) for row in rows)),
         "status": max(len("status"), *(len(str(row["status"])) for row in rows)),
         "size": max(len("size"), *(len(human_readable_size(row["size"])) for row in rows)),
@@ -1708,7 +1732,7 @@ def write_dataset_list(datasets: list[dict[str, Any]], output_format: str) -> No
     )
     for row in rows:
         print(
-            f"{str(row['name']).ljust(widths['name'])}  "
+            f"{truncate_table_cell(row['name'], widths['name']).ljust(widths['name'])}  "
             f"{str(row['id']).ljust(widths['id'])}  "
             f"{str(row['status']).ljust(widths['status'])}  "
             f"{human_readable_size(row['size']).rjust(widths['size'])}"
@@ -1722,6 +1746,29 @@ def write_dataset_list(datasets: list[dict[str, Any]], output_format: str) -> No
         print(f"{status.ljust(summary_name_width)}  {str(status_counts[status]).rjust(summary_count_width)}")
 
 
+def dataset_options_text(dataset: dict[str, Any]) -> str:
+    source = dataset.get("source") or {}
+    metadata = source.get("metadata") or {}
+    csv_options = metadata.get("csv_options") or {}
+    if not csv_options:
+        return ""
+
+    labels: list[str] = []
+    for option_name in ("--csv-x-index", "--csv-y-index", "--csv-wkt-index"):
+        index = csv_options.get(option_name)
+        if index is None:
+            continue
+        labels.append(f"{option_name}={index}")
+    return ", ".join(labels)
+
+
+def truncate_table_cell(value: Any, width: int) -> str:
+    text = str(value)
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    return text[: width - 3] + "..."
 def write_repository_list(repositories: list[dict[str, Any]], output_format: str) -> None:
     rows = [
         {

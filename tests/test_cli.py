@@ -193,6 +193,99 @@ def test_add_dataset_passes_csv_indexes_to_starlet(
     assert calls["kwargs"]["csv_x_index"] == 0
     assert calls["kwargs"]["csv_y_index"] == 1
     assert calls["kwargs"]["csv_wkt_index"] == 2
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    assert dataset["source"]["metadata"]["csv_options"] == {
+        "--csv-x-index": 0,
+        "--csv-y-index": 1,
+        "--csv-wkt-index": 2,
+    }
+
+
+def test_write_dataset_list_shows_csv_options_from_database(capsys) -> None:
+    cli.write_dataset_list(
+        [
+            {
+                "name": "roads",
+                "id": "dataset-1",
+                "dataset_state": "published",
+                "size_bytes": 1024,
+                "schema": [
+                    {"name": "x"},
+                    {"name": "y"},
+                    {"name": "wkt"},
+                    {"name": "name"},
+                ],
+                "source": {
+                    "metadata": {
+                        "csv_options": {
+                            "--csv-x-index": 0,
+                            "--csv-y-index": 1,
+                            "--csv-wkt-index": 2,
+                        }
+                    }
+                },
+            }
+        ],
+        "table",
+    )
+
+    output = capsys.readouterr().out
+    assert "options" not in output
+    assert "--csv-x-index" not in output
+
+
+def test_write_dataset_list_csv_includes_options_column(capsys) -> None:
+    cli.write_dataset_list(
+        [
+            {
+                "name": "roads",
+                "id": "dataset-1",
+                "dataset_state": "published",
+                "size_bytes": 1024,
+                "schema": [{"name": "x"}, {"name": "y"}],
+                "source": {
+                    "metadata": {
+                        "csv_options": {
+                            "--csv-x-index": 0,
+                            "--csv-y-index": 1,
+                        }
+                    }
+                },
+            }
+        ],
+        "csv",
+    )
+
+    output = capsys.readouterr().out
+    assert "name,id,status,size\r\n" in output or "name,id,status,size\n" in output
+    assert "options" not in output
+    assert "roads,dataset-1,published,1024" in output
+
+
+def test_write_dataset_list_json_includes_cli_style_csv_options(capsys) -> None:
+    cli.write_dataset_list(
+        [
+            {
+                "name": "roads",
+                "id": "dataset-1",
+                "dataset_state": "published",
+                "size_bytes": 1024,
+                "source": {
+                    "metadata": {
+                        "csv_options": {
+                            "--csv-x-index": 0,
+                            "--csv-y-index": 1,
+                            "--csv-wkt-index": 2,
+                        }
+                    }
+                },
+            }
+        ],
+        "json",
+    )
+
+    output = capsys.readouterr().out
+    assert '"options": "--csv-x-index=0, --csv-y-index=1, --csv-wkt-index=2"' in output
 
 
 def test_add_dataset_keeps_catalog_row_when_remote_url_is_unreachable(
