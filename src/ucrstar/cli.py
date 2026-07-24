@@ -93,16 +93,7 @@ def main() -> None:
         action="store_true",
         help="Disable UCR Star-generated downloads for this dataset while keeping the source link.",
     )
-    add_dataset.add_argument("--zoom", type=int, default=None)
-    add_dataset.add_argument("--partition-size", type=int)
-    add_dataset.add_argument("--threshold", type=int)
-    add_dataset.add_argument(
-        "--no-covering-bbox",
-        action="store_true",
-        default=None,
-        help="Do not write per-row bounding boxes for faster spatial pruning.",
-    )
-    add_dataset.add_argument("--pmtiles", action="store_true", default=None)
+    add_build_arguments(add_dataset)
 
     process_dataset = subparsers.add_parser(
         "process-dataset",
@@ -346,6 +337,9 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--zoom", type=int, default=None)
     parser.add_argument("--partition-size", type=int)
     parser.add_argument("--threshold", type=int)
+    parser.add_argument("--csv-x-index", type=int)
+    parser.add_argument("--csv-y-index", type=int)
+    parser.add_argument("--csv-wkt-index", type=int)
     parser.add_argument(
         "--no-covering-bbox",
         action="store_true",
@@ -467,6 +461,12 @@ def build_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
         build_kwargs["partition_size"] = args.partition_size
     if args.threshold is not None:
         build_kwargs["threshold"] = args.threshold
+    if getattr(args, "csv_x_index", None) is not None:
+        build_kwargs["csv_x_index"] = args.csv_x_index
+    if getattr(args, "csv_y_index", None) is not None:
+        build_kwargs["csv_y_index"] = args.csv_y_index
+    if getattr(args, "csv_wkt_index", None) is not None:
+        build_kwargs["csv_wkt_index"] = args.csv_wkt_index
     return build_kwargs
 
 
