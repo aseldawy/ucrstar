@@ -1558,26 +1558,7 @@ def cached_download_path(dataset_dir: Path, source: dict[str, Any]) -> Path | No
     download_dir = dataset_dir / "download"
     if not download_dir.exists():
         return None
-    if source.get("type") == "multi_remote_file":
-        return download_dir if any(download_dir.iterdir()) else None
-    metadata = source.get("metadata") or {}
-    candidates = []
-    filename = metadata.get("filename")
-    if filename:
-        candidates.append(download_dir / str(filename))
-    title = metadata.get("title")
-    if title:
-        candidates.append(download_dir / f"{safe_filename(str(title))}.geojson")
-        candidates.append(download_dir / safe_filename(str(title)))
-    for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
-            return candidate
-    files = [path for path in download_dir.iterdir() if path.is_file()]
-    if len(files) == 1:
-        return files[0]
-    if files:
-        return max(files, key=lambda path: path.stat().st_mtime)
-    return None
+    return download_dir if any(download_dir.rglob("*")) else None
 
 
 def find_dataset_by_source(catalog: DatasetCatalog, source: dict[str, Any]) -> dict[str, Any] | None:
