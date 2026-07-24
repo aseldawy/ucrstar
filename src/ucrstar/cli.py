@@ -1107,14 +1107,23 @@ def process_registered_dataset(
     try:
         if prepared.source.get("type") != "local" and prepared.source.get("url") == source_url:
             catalog.update_state(dataset["id"], "downloaded")
-        build_dataset(prepared.path, datasets_root, temp_name, True, build_kwargs)
-        if prepared.source.get("type") != "local":
-            if replace_existing_dir or not prepared_path_is_cached_download(dataset_dir, prepared.path):
-                persist_source_copy(build_dir, prepared)
-        write_source_summary(build_dir, prepared.source)
-        if replace_existing_dir and backup_dir is not None:
-            swap_dataset_dirs(dataset_dir, build_dir, backup_dir)
-            cleanup_dataset_dir(datasets_root, backup_name)
+        if existing_build_is_current(dataset_dir, prepared.source):
+            LOGGER.info(
+                "Skipping Starlet rebuild for dataset '%s' because the existing build is current",
+                dataset_name,
+            )
+            if prepared.source.get("type") != "local" and not (dataset_dir / "download").exists():
+                persist_source_copy(dataset_dir, prepared)
+            write_source_summary(dataset_dir, prepared.source)
+        else:
+            build_dataset(prepared.path, datasets_root, temp_name, True, build_kwargs)
+            if prepared.source.get("type") != "local":
+                if replace_existing_dir or not prepared_path_is_cached_download(dataset_dir, prepared.path):
+                    persist_source_copy(build_dir, prepared)
+            write_source_summary(build_dir, prepared.source)
+            if replace_existing_dir and backup_dir is not None:
+                swap_dataset_dirs(dataset_dir, build_dir, backup_dir)
+                cleanup_dataset_dir(datasets_root, backup_name)
         catalog.sync()
         catalog.update_metadata(dataset_name, {"max_zoom": int(build_kwargs["zoom"])})
         processed = catalog.get(dataset_name)
@@ -1559,6 +1568,42 @@ def cached_download_path(dataset_dir: Path, source: dict[str, Any]) -> Path | No
     if not download_dir.exists():
         return None
     return download_dir if any(download_dir.rglob("*")) else None
+
+
+def existing_build_is_current(dataset_dir: Path, source: dict[str, Any]) -> bool:
+    if not dataset_dir.exists():
+        return False
+    try:
+        metadata = starlet.get_dataset_metadata(dataset_dir) or {}
+    except Exception:
+        return False
+    if not metadata.get("exists"):
+        return False
+    source_modified = parse_timestamp(source.get("modified_at"))
+    if source_modified is None:
+        return True
+    build_modified = build_timestamp_from_dataset_dir(dataset_dir)
+    if build_modified is None:
+        return False
+    return build_modified >= source_modified
+
+
+def build_timestamp_from_dataset_dir(dataset_dir: Path) -> datetime | None:
+    timestamps: list[float] = []
+    for child in dataset_dir.iterdir():
+        if child.name == "download":
+            continue
+        if child.is_dir():
+            timestamps.extend(
+                grandchild.stat().st_mtime
+                for grandchild in child.rglob("*")
+                if grandchild.exists()
+            )
+        elif child.exists():
+            timestamps.append(child.stat().st_mtime)
+    if not timestamps:
+        return None
+    return datetime.fromtimestamp(max(timestamps), tz=timezone.utc)
 
 
 def find_dataset_by_source(catalog: DatasetCatalog, source: dict[str, Any]) -> dict[str, Any] | None:

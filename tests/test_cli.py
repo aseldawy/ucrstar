@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 import urllib.error
@@ -1191,6 +1192,91 @@ def test_process_dataset_processes_created_dataset(
     assert calls["name"] == "roads"
     assert dataset["dataset_state"] == "published"
     assert "Published dataset roads with ID" in caplog.text
+
+
+def test_process_dataset_reuses_current_existing_build_and_still_publishes(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    dataset_dir = datasets_dir / "roads"
+    dataset_dir.mkdir(parents=True)
+    (dataset_dir / "tiles.pmtiles").write_text("pmtiles", encoding="utf-8")
+    (dataset_dir / "part-00000.parquet").write_text("parquet", encoding="utf-8")
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    input_path = tmp_path / "source.geojson"
+    input_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setattr(
+        cli.starlet,
+        "list_datasets",
+        lambda root: ["roads"] if dataset_dir.exists() else [],
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10 * 1024 * 1024,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": False,
+            "has_pmtiles": True,
+            "mvt_tile_count": 12,
+            "max_zoom": 10,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+
+    def fail_add_dataset(*args, **kwargs):
+        raise AssertionError("starlet.add_dataset should not be called when the existing build is current")
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fail_add_dataset)
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    dataset = catalog.register_source(
+        "roads",
+        cli.registration_source(str(input_path)),
+        overwrite=True,
+    )
+    assert dataset["dataset_state"] == "created"
+    source_mtime = input_path.stat().st_mtime
+    current_mtime = source_mtime + 60
+    for artifact in (dataset_dir / "tiles.pmtiles", dataset_dir / "part-00000.parquet"):
+        os.utime(artifact, (current_mtime, current_mtime))
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "process-dataset",
+            "roads",
+        ],
+    )
+
+    cli.main()
+
+    processed = catalog.get("roads")
+    assert processed["dataset_state"] == "published"
+    assert processed["visualization"]["type"] == "VectorTile"
+    assert "Skipping Starlet rebuild for dataset 'roads'" in caplog.text
 
 
 def test_process_dataset_downloads_remote_source_to_temporary_path(
