@@ -85,6 +85,79 @@ def test_catalog_tracks_repository_and_filters_datasets(tmp_path: Path) -> None:
     assert counts["lacounty"] == 1
 
 
+def test_catalog_sync_does_not_publish_empty_registered_dataset(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "roads" / "download").mkdir(parents=True)
+    db_path = tmp_path / "catalog.sqlite"
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        "starlet.get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 0,
+            "bbox": None,
+            "has_mvt": False,
+        },
+    )
+    monkeypatch.setattr("starlet.get_dataset_summary", lambda dataset: {})
+
+    catalog = DatasetCatalog(db_path, datasets_dir)
+    catalog.register_source(
+        "roads",
+        {
+            "type": "local",
+            "url": str(tmp_path / "source.geojson"),
+            "accessed_at": "2026-07-24T10:00:00+00:00",
+            "metadata": {},
+        },
+    )
+
+    synced = catalog.sync()[0]
+    dataset = catalog.get("roads")
+
+    assert synced["dataset_state"] == "created"
+    assert synced["visualization_type"] is None
+    assert dataset["dataset_state"] == "created"
+    assert dataset["size_bytes"] == 0
+
+
+def test_catalog_sync_does_not_publish_built_dataset(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "roads").mkdir(parents=True)
+    db_path = tmp_path / "catalog.sqlite"
+    metadata = {
+        "name": "roads",
+        "path": str(datasets_dir / "roads"),
+        "exists": True,
+        "size_bytes": 10,
+        "bbox": [0, 1, 2, 3],
+        "has_mvt": True,
+    }
+
+    monkeypatch.setattr("starlet.list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr("starlet.get_dataset_metadata", lambda dataset: metadata)
+    monkeypatch.setattr(
+        "starlet.get_dataset_summary",
+        lambda dataset: {
+            "geometry": [{"geom_types": {"LineString": 4}, "total_points": 20}],
+            "attributes": [],
+        },
+    )
+
+    catalog = DatasetCatalog(db_path, datasets_dir)
+    assert catalog.sync()[0]["dataset_state"] == "created"
+    assert catalog.get("roads")["dataset_state"] == "created"
+
+
 def test_catalog_enriches_style_and_embedding(tmp_path: Path, monkeypatch) -> None:
     datasets_dir = tmp_path / "datasets"
     (datasets_dir / "roads").mkdir(parents=True)

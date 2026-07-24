@@ -141,15 +141,21 @@ class DatasetCatalog:
         with self.connect() as conn:
             default_repository = self.default_repository()
             known = {
-                row["name"]: (row["id"], row["repository_id"])
-                for row in conn.execute("SELECT id, repository_id, name FROM datasets")
+                row["name"]: row
+                for row in conn.execute(
+                    "SELECT id, repository_id, name, dataset_state, error_message FROM datasets"
+                )
             }
             for name in names:
                 existing = known.get(name)
-                dataset_id = existing[0] if existing else str(uuid.uuid4())
+                dataset_id = existing["id"] if existing is not None else str(uuid.uuid4())
                 LOGGER.info("Reading Starlet metadata for dataset '%s'", name)
-                row = self._build_row(dataset_id, name)
-                row["repository_id"] = existing[1] if existing and existing[1] else default_repository["id"]
+                row = self._build_row(dataset_id, name, existing)
+                row["repository_id"] = (
+                    existing["repository_id"]
+                    if existing is not None and existing["repository_id"]
+                    else default_repository["id"]
+                )
                 self._upsert(conn, row)
                 synced.append(row)
         return synced
@@ -671,7 +677,12 @@ class DatasetCatalog:
             (default_id,),
         )
 
-    def _build_row(self, dataset_id: str, name: str) -> dict[str, Any]:
+    def _build_row(
+        self,
+        dataset_id: str,
+        name: str,
+        existing: sqlite3.Row | None = None,
+    ) -> dict[str, Any]:
         """Build a catalog row from Starlet metadata and summary files."""
         dataset_dir = self.datasets_dir / name
         metadata = starlet.get_dataset_metadata(dataset_dir)
@@ -700,6 +711,13 @@ class DatasetCatalog:
             if visualization_type == "MVT"
             else None
         )
+        existing_state = existing["dataset_state"] if existing is not None else None
+        if existing_state in DATASET_STATES:
+            dataset_state = existing_state
+            error_message = existing["error_message"] if existing_state == "error" else None
+        else:
+            dataset_state = "created"
+            error_message = None
 
         return {
             "id": dataset_id,
@@ -715,8 +733,8 @@ class DatasetCatalog:
             "visualization_type": visualization_type,
             "visualization_url": visualization_url,
             "style_json": fallback_style(sorted(geom_types)),
-            "dataset_state": "published",
-            "error_message": None,
+            "dataset_state": dataset_state,
+            "error_message": error_message,
             "metadata_json": metadata,
             "summary_json": summary,
         }
