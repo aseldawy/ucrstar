@@ -217,7 +217,10 @@ def main() -> None:
             LOGGER.info("Added %d dataset(s).", len(added) if isinstance(added, list) else 1)
             return
         source_metadata = source_metadata_from_args(args)
-        source = apply_source_metadata(registration_source(input_source), source_metadata)
+        source = apply_source_metadata(
+            registration_source(input_source, probe_remote=not args.create_only),
+            source_metadata,
+        )
         existing = find_dataset_by_source(catalog, source)
         if existing is None:
             candidate_name = args.name or dataset_name_from_source(source, source_name_path(input_source, source))
@@ -506,7 +509,10 @@ def add_dataset_from_source(
         )
 
     if create_only:
-        source = apply_source_metadata(registration_source(input_path_or_url), source_metadata)
+        source = apply_source_metadata(
+            registration_source(input_path_or_url, probe_remote=False),
+            source_metadata,
+        )
         existing = find_dataset_by_source(catalog, source)
         if existing is not None:
             log_existing_dataset_skip(input_path_or_url, existing)
@@ -1024,8 +1030,8 @@ def normalize_service_url(service_url: str) -> str:
     return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
 
 
-def registration_source(input_path_or_url: str) -> dict[str, Any]:
-    return source_reference(input_path_or_url)
+def registration_source(input_path_or_url: str, *, probe_remote: bool = True) -> dict[str, Any]:
+    return source_reference(input_path_or_url, probe_remote=probe_remote)
 
 
 def source_name_path(input_path_or_url: str, source: dict[str, Any]) -> Path:

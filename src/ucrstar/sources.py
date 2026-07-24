@@ -65,11 +65,11 @@ def prepare_input_source(value: str) -> PreparedSource:
     return prepare_local_source(value)
 
 
-def source_reference(value: str) -> dict[str, Any]:
+def source_reference(value: str, *, probe_remote: bool = True) -> dict[str, Any]:
     if is_multi_url(value):
-        return multi_remote_source_reference(value)
+        return multi_remote_source_reference(value, probe_remote=probe_remote)
     if is_url(value):
-        return remote_source_reference(value)
+        return remote_source_reference(value, probe_remote=probe_remote)
     return prepare_local_source(value).source
 
 
@@ -82,9 +82,9 @@ def is_multi_url(value: str) -> bool:
     return len(urls) > 1 and all(is_url(url) for url in urls)
 
 
-def multi_remote_source_reference(value: str) -> dict[str, Any]:
+def multi_remote_source_reference(value: str, *, probe_remote: bool = True) -> dict[str, Any]:
     urls = split_source_urls(value)
-    files = [remote_file_metadata(url) for url in urls]
+    files = [remote_file_metadata(url, probe_remote=probe_remote) for url in urls]
     modified_values = [
         file_metadata.get("modified_at")
         for file_metadata in files
@@ -103,9 +103,9 @@ def multi_remote_source_reference(value: str) -> dict[str, Any]:
     }
 
 
-def remote_file_metadata(url: str) -> dict[str, Any]:
+def remote_file_metadata(url: str, probe_remote: bool = True) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
-    headers = safe_head_url(url)
+    headers = safe_head_url(url) if probe_remote else {}
     filename = filename_from_url_or_headers(url, headers)
     return {
         "url": url,
@@ -118,8 +118,8 @@ def remote_file_metadata(url: str) -> dict[str, Any]:
     }
 
 
-def remote_source_reference(url: str) -> dict[str, Any]:
-    metadata = remote_file_metadata(url)
+def remote_source_reference(url: str, *, probe_remote: bool = True) -> dict[str, Any]:
+    metadata = remote_file_metadata(url, probe_remote=probe_remote)
     return {
         "type": "remote_file",
         "url": url,

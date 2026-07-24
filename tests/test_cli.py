@@ -438,7 +438,7 @@ def test_add_dataset_create_only_registers_remote_source_timestamp(
     monkeypatch.setattr(
         cli,
         "source_reference",
-        lambda value: {
+        lambda value, *, probe_remote=True: {
             "type": "remote_file",
             "url": value,
             "accessed_at": "2026-07-01T00:00:00+00:00",
@@ -474,6 +474,58 @@ def test_add_dataset_create_only_registers_remote_source_timestamp(
     assert dataset["source"]["url"] == url
     assert dataset["source"]["modified_at"] == "2026-06-30T06:24:35+00:00"
     assert dataset["source"]["metadata"]["content_type"] == "application/geo+json"
+
+
+def test_add_dataset_create_only_does_not_probe_remote_url(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    url = "https://example.com/data/roads.geojson"
+
+    def fail_source_reference(value, *, probe_remote=True):
+        assert value == url
+        if probe_remote:
+            raise AssertionError("create-only should not probe remote URLs")
+        return {
+            "type": "remote_file",
+            "url": value,
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {
+                "url": value,
+                "path": "/data/roads.geojson",
+                "netloc": "example.com",
+                "filename": "roads.geojson",
+                "content_type": None,
+                "content_length": None,
+            },
+        }
+
+    monkeypatch.setattr(cli, "source_reference", fail_source_reference)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            url,
+            "--create-only",
+        ],
+    )
+
+    cli.main()
+
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    assert dataset["dataset_state"] == "created"
+    assert dataset["source"]["url"] == url
+    assert dataset["source"]["metadata"]["filename"] == "roads.geojson"
 
 
 def test_add_dataset_can_disable_generated_downloads(
