@@ -1094,21 +1094,32 @@ def process_registered_dataset(
     if not source_url:
         raise ValueError(f"Dataset has no source URL: {dataset['name']}")
 
-    dataset_dir = Path(datasets_dir) / dataset_relative_path(dataset["name"])
+    datasets_root = Path(datasets_dir)
+    dataset_name = dataset["name"]
+    dataset_dir = datasets_root / dataset_relative_path(dataset_name)
+    replace_existing_dir = dataset_dir.exists()
+    temp_name = f"{dataset_name}__build_{uuid.uuid4().hex[:12]}" if replace_existing_dir else dataset_name
+    backup_name = f"{dataset_name}__backup_{uuid.uuid4().hex[:12]}" if replace_existing_dir else None
+    build_dir = datasets_root / dataset_relative_path(temp_name)
+    backup_dir = datasets_root / dataset_relative_path(backup_name) if backup_name else None
     LOGGER.info("Processing dataset '%s' from %s", dataset["name"], source_url)
     prepared = prepare_dataset_source(dataset_dir, source_url, source)
     try:
         if prepared.source.get("type") != "local" and prepared.source.get("url") == source_url:
             catalog.update_state(dataset["id"], "downloaded")
-        build_dataset(prepared.path, datasets_dir, dataset["name"], True, build_kwargs)
-        if prepared.source.get("type") != "local" and not prepared_path_is_cached_download(dataset_dir, prepared.path):
-            persist_source_copy(dataset_dir, prepared)
-        write_source_summary(dataset_dir, prepared.source)
+        build_dataset(prepared.path, datasets_root, temp_name, True, build_kwargs)
+        if prepared.source.get("type") != "local":
+            if replace_existing_dir or not prepared_path_is_cached_download(dataset_dir, prepared.path):
+                persist_source_copy(build_dir, prepared)
+        write_source_summary(build_dir, prepared.source)
+        if replace_existing_dir and backup_dir is not None:
+            swap_dataset_dirs(dataset_dir, build_dir, backup_dir)
+            cleanup_dataset_dir(datasets_root, backup_name)
         catalog.sync()
-        catalog.update_metadata(dataset["name"], {"max_zoom": int(build_kwargs["zoom"])})
-        processed = catalog.get(dataset["name"])
+        catalog.update_metadata(dataset_name, {"max_zoom": int(build_kwargs["zoom"])})
+        processed = catalog.get(dataset_name)
         if processed is None:
-            raise RuntimeError(f"Dataset was built but not found in catalog: {dataset['name']}")
+            raise RuntimeError(f"Dataset was built but not found in catalog: {dataset_name}")
         processed = catalog.update_source(processed["id"], prepared.source) or processed
         processed = catalog.update_state(processed["id"], "processed") or processed
 
@@ -1127,9 +1138,17 @@ def process_registered_dataset(
         processed = catalog.update_state(processed["id"], "published") or processed
         LOGGER.info("Published dataset %s with ID %s.", processed["name"], processed["id"])
         return processed
+    except Exception:
+        if replace_existing_dir and backup_dir is not None and backup_dir.exists() and not dataset_dir.exists():
+            backup_dir.rename(dataset_dir)
+        raise
     finally:
         if hasattr(prepared, "cleanup"):
             prepared.cleanup()
+        if replace_existing_dir:
+            cleanup_dataset_dir(datasets_root, temp_name)
+            if backup_name is not None:
+                cleanup_dataset_dir(datasets_root, backup_name)
 
 
 def build_dataset(
