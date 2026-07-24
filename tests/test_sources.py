@@ -1,4 +1,5 @@
 from pathlib import Path
+import urllib.error
 
 from ucrstar import sources
 
@@ -42,6 +43,22 @@ def test_source_reference_for_remote_file_uses_http_timestamp(monkeypatch) -> No
     assert source["metadata"]["filename"] == "roads.geojson"
     assert source["metadata"]["content_type"] == "application/geo+json"
     assert source["metadata"]["content_length"] == "42"
+
+
+def test_source_reference_for_inaccessible_remote_file_still_returns_reference(monkeypatch) -> None:
+    def fail_head_url(url):
+        raise urllib.error.URLError("unreachable")
+
+    monkeypatch.setattr(sources, "head_url", fail_head_url)
+
+    source = sources.source_reference("https://example.com/data/roads.geojson")
+
+    assert source["type"] == "remote_file"
+    assert source["url"] == "https://example.com/data/roads.geojson"
+    assert source["modified_at"] is None
+    assert source["metadata"]["filename"] == "roads.geojson"
+    assert source["metadata"]["content_type"] is None
+    assert source["metadata"]["content_length"] is None
 
 
 def test_source_reference_for_multiple_remote_files(monkeypatch) -> None:

@@ -2,6 +2,7 @@ import json
 import logging
 import tempfile
 from pathlib import Path
+import urllib.error
 
 from ucrstar import cli
 from ucrstar.esri_hub import HubDataset
@@ -118,6 +119,45 @@ def test_add_dataset_builds_and_catalogs_dataset(
     assert dataset["source"]["url"] == str(input_path.resolve())
     assert dataset["dataset_state"] == "published"
     assert "Added dataset roads with ID" in caplog.text
+
+
+def test_add_dataset_keeps_catalog_row_when_remote_url_is_unreachable(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    caplog.set_level(logging.INFO)
+
+    def fake_prepare_input_source(value):
+        raise urllib.error.URLError("unreachable")
+
+    monkeypatch.setattr(cli, "prepare_input_source", fake_prepare_input_source)
+    monkeypatch.setattr(cli.starlet, "get_config", lambda: {"mvt": {"zoom": 10}})
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            "https://example.com/data/roads.geojson",
+            "--name",
+            "roads",
+        ],
+    )
+
+    cli.main()
+
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    assert dataset is not None
+    assert dataset["dataset_state"] == "error"
+    assert "Could not reach remote URL" in caplog.text or "could not be reached" in caplog.text
 
 
 def test_add_dataset_remembers_starlet_config_zoom(

@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import uuid
+import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -544,6 +545,14 @@ def add_dataset_from_source(
     )
     try:
         return process_registered_dataset(catalog, dataset, datasets_dir, overwrite, build_kwargs, project_config)
+    except urllib.error.URLError as exc:
+        LOGGER.warning(
+            "Keeping dataset '%s' in the catalog even though the source URL could not be reached: %s",
+            dataset["name"],
+            exc,
+        )
+        record_dataset_error(catalog, dataset, exc)
+        return catalog.get(dataset["id"]) or dataset
     except Exception as exc:
         record_dataset_error(catalog, dataset, exc)
         raise

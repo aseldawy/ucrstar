@@ -105,7 +105,7 @@ def multi_remote_source_reference(value: str) -> dict[str, Any]:
 
 def remote_file_metadata(url: str) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
-    headers = head_url(url)
+    headers = safe_head_url(url)
     filename = filename_from_url_or_headers(url, headers)
     return {
         "url": url,
@@ -631,6 +631,14 @@ def head_url(url: str) -> dict[str, str]:
         )
         with urllib.request.urlopen(request, timeout=30, context=ssl_context()) as response:
             return dict(response.headers.items())
+
+
+def safe_head_url(url: str) -> dict[str, str]:
+    try:
+        return head_url(url)
+    except urllib.error.URLError:
+        LOGGER.warning("Could not reach remote URL %s while recording source metadata", url)
+        return {}
 
 
 def normalize_request_url(url: str) -> str:
