@@ -1432,6 +1432,180 @@ def test_process_dataset_preserves_cached_download_for_nested_dataset_name(
     assert catalog.get("NE/lakes")["source"]["url"] == url
 
 
+def test_process_dataset_uses_cached_download_when_remote_url_fails(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    calls = {}
+    datasets_dir = tmp_path / "datasets"
+    dataset_dir = datasets_dir / "roads"
+    download_dir = dataset_dir / "download"
+    download_dir.mkdir(parents=True)
+    cached_file = download_dir / "roads.geojson"
+    cached_file.write_text("cached", encoding="utf-8")
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    url = "https://example.com/data/roads.geojson"
+    caplog.set_level(logging.WARNING)
+
+    monkeypatch.setattr(cli, "current_source_state", lambda source: (_ for _ in ()).throw(urllib.error.URLError("offline")))
+    monkeypatch.setattr(cli, "prepare_input_source", lambda value: (_ for _ in ()).throw(AssertionError("cached fallback should avoid downloading")))
+    monkeypatch.setattr(
+        cli.starlet,
+        "list_datasets",
+        lambda root: ["roads"] if dataset_dir.exists() else [],
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": Path(dataset).name,
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"LineString": 1}, "total_points": 2}],
+            "attributes": [],
+        },
+    )
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        calls["input_arg"] = input_arg
+        calls["name"] = kwargs["name"]
+        target = Path(datasets_arg) / kwargs["name"]
+        if target.exists():
+            cli.shutil.rmtree(target)
+        target.mkdir(parents=True)
+        return None, None, None
+
+    def fake_delete_dataset(datasets_arg, name_arg, **kwargs):
+        target = Path(datasets_arg) / name_arg
+        if target.exists():
+            cli.shutil.rmtree(target)
+            return True
+        return False
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(cli.starlet, "delete_dataset", fake_delete_dataset)
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    dataset = catalog.sync()[0]
+    catalog.update_source(
+        dataset["id"],
+        {
+            "type": "remote_file",
+            "url": url,
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {"filename": "roads.geojson"},
+        },
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "process-dataset",
+            "roads",
+        ],
+    )
+
+    cli.main()
+
+    assert calls["name"].startswith("roads__build_")
+    assert Path(calls["input_arg"]) == cached_file
+    assert "using cached source copy" in caplog.text.lower()
+    assert catalog.get("roads")["dataset_state"] == "published"
+
+
+def test_process_dataset_reports_error_when_remote_url_fails_without_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    dataset_dir = datasets_dir / "roads"
+    dataset_dir.mkdir(parents=True)
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    url = "https://example.com/data/roads.geojson"
+
+    monkeypatch.setattr(cli, "current_source_state", lambda source: (_ for _ in ()).throw(urllib.error.URLError("offline")))
+    monkeypatch.setattr(
+        cli.starlet,
+        "list_datasets",
+        lambda root: ["roads"] if dataset_dir.exists() else [],
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": Path(dataset).name,
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"LineString": 1}, "total_points": 2}],
+            "attributes": [],
+        },
+    )
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    dataset = catalog.sync()[0]
+    catalog.update_source(
+        dataset["id"],
+        {
+            "type": "remote_file",
+            "url": url,
+            "accessed_at": "2026-07-01T00:00:00+00:00",
+            "modified_at": None,
+            "metadata": {"filename": "roads.geojson"},
+        },
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "process-dataset",
+            "roads",
+        ],
+    )
+
+    try:
+        cli.main()
+    except urllib.error.URLError:
+        pass
+    else:
+        raise AssertionError("process-dataset should fail when neither remote nor cache is available")
+
+    assert catalog.get("roads")["dataset_state"] == "error"
+
+
 def test_add_dataset_accepts_multiple_input_urls(
     tmp_path: Path,
     monkeypatch,

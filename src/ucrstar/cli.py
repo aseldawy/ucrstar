@@ -1494,8 +1494,23 @@ def cleanup_dataset_dir(datasets_dir: Path, name: str) -> None:
 
 def prepare_dataset_source(dataset_dir: Path, source_url: str, source: dict[str, Any]) -> Any:
     """Prefer a current cached download when it is newer than the remote source."""
-    current = source if source.get("modified_at") else current_source_state(source)
+    current = source
+    cached_path: Path | None = None
     if source.get("type") != "local":
+        try:
+            current = source if source.get("modified_at") else current_source_state(source)
+        except (urllib.error.URLError, urllib.error.HTTPError) as exc:
+            current = {**source, "accessed_at": utc_now_iso()}
+            cached_path = cached_download_path(dataset_dir, current)
+            if cached_path is not None:
+                LOGGER.warning(
+                    "Could not reach remote source %s; using cached source copy at %s",
+                    source_url,
+                    cached_path,
+                )
+                return SimplePreparedSource(path=cached_path, source=current)
+            raise exc
+
         cached_path = cached_download_path(dataset_dir, current)
         current_modified = parse_timestamp(current.get("modified_at"))
         cached_modified = timestamp_from_path(cached_path) if cached_path else None
@@ -1503,7 +1518,19 @@ def prepare_dataset_source(dataset_dir: Path, source_url: str, source: dict[str,
             if current_modified is None or cached_modified >= current_modified:
                 LOGGER.info("Using cached source copy for %s", source_url)
                 return SimplePreparedSource(path=cached_path, source=current)
-    prepared = prepare_input_source(source_url)
+    try:
+        prepared = prepare_input_source(source_url)
+    except (urllib.error.URLError, urllib.error.HTTPError):
+        if source.get("type") != "local":
+            fallback_path = cached_path or cached_download_path(dataset_dir, current)
+            if fallback_path is not None:
+                LOGGER.warning(
+                    "Could not download remote source %s; using cached source copy at %s",
+                    source_url,
+                    fallback_path,
+                )
+                return SimplePreparedSource(path=fallback_path, source=current)
+        raise
     prepared.source = merge_prepared_source_metadata(prepared.source, source)
     return prepared
 
