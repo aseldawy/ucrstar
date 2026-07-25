@@ -938,7 +938,23 @@ def process_registered_dataset(
         raise ValueError(f"Dataset has no source URL: {dataset['name']}")
 
     LOGGER.info("Processing dataset '%s' from %s", dataset["name"], source_url)
-    prepared = prepare_dataset_source(Path(datasets_dir) / dataset["name"], source_url, source)
+    dataset_dir = Path(datasets_dir) / dataset["name"]
+    try:
+        prepared = prepare_dataset_source(dataset_dir, source_url, source)
+    except Exception as exc:
+        if source.get("type") == "local" or not existing_starlet_dataset(
+            Path(datasets_dir), dataset["name"]
+        ):
+            raise
+        LOGGER.warning(
+            "Remote source unavailable for dataset '%s' (%s). "
+            "Using the existing Starlet artifacts and continuing publication.",
+            dataset["name"],
+            exc,
+        )
+        write_source_summary(dataset_dir, source)
+        return finalize_processed_dataset(catalog, dataset["name"], source, project_config)
+
     try:
         if prepared.source.get("type") != "local" and prepared.source.get("url") == source_url:
             catalog.update_state(dataset["id"], "downloaded")
@@ -946,31 +962,48 @@ def process_registered_dataset(
         if prepared.source.get("type") != "local" and prepared.path.parent.name != "download":
             persist_source_copy(Path(datasets_dir) / dataset["name"], prepared)
         write_source_summary(Path(datasets_dir) / dataset["name"], prepared.source)
-        catalog.sync()
-        processed = catalog.get(dataset["name"])
-        if processed is None:
-            raise RuntimeError(f"Dataset was built but not found in catalog: {dataset['name']}")
-        processed = catalog.update_source(processed["id"], prepared.source) or processed
-        processed = catalog.update_state(processed["id"], "processed") or processed
-
-        llm = llm_from_config(project_config)
-        if llm.enabled:
-            LOGGER.info(
-                "LLM enrichment enabled: provider=%s chat_model=%s embedding_model=%s",
-                llm.provider,
-                llm.chat_model,
-                llm.embedding_model,
-            )
-            processed = catalog.enrich(processed["id"], llm) or processed
-        else:
-            LOGGER.info("LLM enrichment disabled")
-        processed = catalog.update_state(processed["id"], "ready") or processed
-        processed = catalog.update_state(processed["id"], "published") or processed
-        LOGGER.info("Published dataset %s with ID %s.", processed["name"], processed["id"])
-        return processed
+        return finalize_processed_dataset(
+            catalog, dataset["name"], prepared.source, project_config
+        )
     finally:
         if hasattr(prepared, "cleanup"):
             prepared.cleanup()
+
+
+def existing_starlet_dataset(datasets_dir: Path, dataset_name: str) -> bool:
+    """Return whether Starlet recognizes a previously built dataset directory."""
+    return dataset_name in starlet.list_datasets(datasets_dir)
+
+
+def finalize_processed_dataset(
+    catalog: DatasetCatalog,
+    dataset_name: str,
+    source: dict[str, Any],
+    project_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Sync built artifacts, enrich their catalog row, and publish the dataset."""
+    catalog.sync()
+    processed = catalog.get(dataset_name)
+    if processed is None:
+        raise RuntimeError(f"Dataset artifacts were not found in catalog: {dataset_name}")
+    processed = catalog.update_source(processed["id"], source) or processed
+    processed = catalog.update_state(processed["id"], "processed") or processed
+
+    llm = llm_from_config(project_config)
+    if llm.enabled:
+        LOGGER.info(
+            "LLM enrichment enabled: provider=%s chat_model=%s embedding_model=%s",
+            llm.provider,
+            llm.chat_model,
+            llm.embedding_model,
+        )
+        processed = catalog.enrich(processed["id"], llm) or processed
+    else:
+        LOGGER.info("LLM enrichment disabled")
+    processed = catalog.update_state(processed["id"], "ready") or processed
+    processed = catalog.update_state(processed["id"], "published") or processed
+    LOGGER.info("Published dataset %s with ID %s.", processed["name"], processed["id"])
+    return processed
 
 
 def build_dataset(
@@ -1285,7 +1318,17 @@ def cleanup_dataset_dir(datasets_dir: Path, name: str) -> None:
 
 def prepare_dataset_source(dataset_dir: Path, source_url: str, source: dict[str, Any]) -> Any:
     """Prefer a current cached download when it is newer than the remote source."""
-    current = source if source.get("modified_at") else current_source_state(source)
+    try:
+        current = source if source.get("modified_at") else current_source_state(source)
+    except Exception as exc:
+        if source.get("type") == "local":
+            raise
+        LOGGER.warning(
+            "Could not inspect remote source %s (%s); checking local cached data.",
+            source_url,
+            exc,
+        )
+        current = source
     if source.get("type") != "local":
         cached_path = cached_download_path(dataset_dir, current)
         current_modified = parse_timestamp(current.get("modified_at"))

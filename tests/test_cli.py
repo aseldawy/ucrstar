@@ -859,6 +859,124 @@ def test_process_dataset_downloads_remote_source_to_temporary_path(
     assert dataset["source"]["modified_at"] == "2026-06-30T06:24:35+00:00"
 
 
+def test_prepare_dataset_source_uses_cache_when_remote_inspection_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    dataset_dir = tmp_path / "datasets" / "roads"
+    cached = dataset_dir / "download" / "roads.geojson"
+    cached.parent.mkdir(parents=True)
+    cached.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    source = {
+        "type": "remote_file",
+        "url": "https://example.com/roads.geojson",
+        "modified_at": None,
+        "metadata": {"filename": "roads.geojson"},
+    }
+
+    def fail_remote_state(value):
+        raise RuntimeError("remote unavailable")
+
+    monkeypatch.setattr(cli, "current_source_state", fail_remote_state)
+
+    prepared = cli.prepare_dataset_source(dataset_dir, source["url"], source)
+
+    assert prepared.path == cached
+    assert prepared.source == source
+
+
+def test_process_dataset_publishes_existing_artifacts_when_remote_fails(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    dataset_dir = datasets_dir / "roads"
+    dataset_dir.mkdir(parents=True)
+    (dataset_dir / "tiles.pmtiles").write_bytes(b"pmtiles")
+    (dataset_dir / "parquet_tiles").mkdir()
+    (dataset_dir / "parquet_tiles" / "tile.parquet").write_bytes(b"parquet")
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    caplog.set_level(logging.INFO)
+    calls = {"enrich": 0}
+
+    monkeypatch.setattr(
+        cli,
+        "prepare_dataset_source",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("HTTP 409")),
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "list_datasets",
+        lambda root: ["roads"],
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 16,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": False,
+            "has_pmtiles": True,
+            "parquet_tile_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"Polygon": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+
+    class FakeLLM:
+        enabled = True
+        provider = "test"
+        chat_model = "test-chat"
+        embedding_model = "test-embedding"
+
+    monkeypatch.setattr(cli, "llm_from_config", lambda config: FakeLLM())
+
+    def fake_enrich(self, dataset_id, llm):
+        calls["enrich"] += 1
+        return self.get(dataset_id)
+
+    monkeypatch.setattr(cli.DatasetCatalog, "enrich", fake_enrich)
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    catalog.register_source(
+        "roads",
+        {
+            "type": "remote_file",
+            "url": "https://example.com/roads.geojson",
+            "modified_at": None,
+            "metadata": {"filename": "roads.geojson"},
+        },
+        overwrite=True,
+    )
+
+    processed = cli.process_registered_dataset(
+        catalog,
+        catalog.get("roads"),
+        datasets_dir,
+        False,
+        {},
+        {},
+    )
+
+    assert processed["dataset_state"] == "published"
+    assert processed["metadata_json"]["parquet_tile_count"] == 1
+    assert processed["metadata_json"]["has_pmtiles"] is True
+    assert calls["enrich"] == 1
+    assert "Using the existing Starlet artifacts and continuing publication" in caplog.text
+    assert "Published dataset roads with ID" in caplog.text
+
+
 def test_delete_dataset_removes_folder_and_catalog_entry(
     tmp_path: Path,
     monkeypatch,
