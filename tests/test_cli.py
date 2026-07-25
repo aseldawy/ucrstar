@@ -201,6 +201,85 @@ def test_add_dataset_passes_csv_indexes_to_starlet(
     }
 
 
+def test_add_dataset_passes_csv_column_names_to_starlet(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = {}
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    input_path = tmp_path / "source.csv"
+    input_path.write_text("longitude,latitude,wkt\n1,2,POINT(1 2)\n", encoding="utf-8")
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        calls["input_arg"] = input_arg
+        calls["datasets_arg"] = datasets_arg
+        calls["kwargs"] = kwargs
+        (datasets_dir / kwargs["name"]).mkdir(parents=True)
+        return None, None, None
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(cli.starlet, "get_config", lambda: {"mvt": {"zoom": 10}})
+    monkeypatch.setattr(cli.starlet, "list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"Point": 1}, "total_points": 1}],
+            "attributes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            str(input_path),
+            "--name",
+            "roads",
+            "--csv-x-col",
+            "longitude",
+            "--csv-y-col",
+            "latitude",
+            "--csv-wkt-col",
+            "wkt",
+        ],
+    )
+
+    cli.main()
+
+    assert calls["input_arg"] == str(input_path)
+    assert calls["datasets_arg"] == str(datasets_dir)
+    assert calls["kwargs"]["csv_x_col"] == "longitude"
+    assert calls["kwargs"]["csv_y_col"] == "latitude"
+    assert calls["kwargs"]["csv_wkt_col"] == "wkt"
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    assert dataset["source"]["metadata"]["csv_options"] == {
+        "--csv-x-col": "longitude",
+        "--csv-y-col": "latitude",
+        "--csv-wkt-col": "wkt",
+    }
+
+
 def test_write_dataset_list_shows_csv_options_from_database(capsys) -> None:
     cli.write_dataset_list(
         [
@@ -286,6 +365,32 @@ def test_write_dataset_list_json_includes_cli_style_csv_options(capsys) -> None:
 
     output = capsys.readouterr().out
     assert '"options": "--csv-x-index=0, --csv-y-index=1, --csv-wkt-index=2"' in output
+
+
+def test_write_dataset_list_json_includes_csv_column_name_options(capsys) -> None:
+    cli.write_dataset_list(
+        [
+            {
+                "name": "roads",
+                "id": "dataset-1",
+                "dataset_state": "published",
+                "size_bytes": 1024,
+                "source": {
+                    "metadata": {
+                        "csv_options": {
+                            "--csv-x-col": "longitude",
+                            "--csv-y-col": "latitude",
+                            "--csv-wkt-col": "wkt",
+                        }
+                    }
+                },
+            }
+        ],
+        "json",
+    )
+
+    output = capsys.readouterr().out
+    assert '"options": "--csv-x-col=longitude, --csv-y-col=latitude, --csv-wkt-col=wkt"' in output
 
 
 def test_add_dataset_keeps_catalog_row_when_remote_url_is_unreachable(

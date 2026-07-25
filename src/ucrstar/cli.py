@@ -340,6 +340,9 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--csv-x-index", type=int)
     parser.add_argument("--csv-y-index", type=int)
     parser.add_argument("--csv-wkt-index", type=int)
+    parser.add_argument("--csv-x-col")
+    parser.add_argument("--csv-y-col")
+    parser.add_argument("--csv-wkt-col")
     parser.add_argument(
         "--no-covering-bbox",
         action="store_true",
@@ -361,14 +364,20 @@ def source_metadata_from_args(args: argparse.Namespace) -> dict[str, Any] | None
     return metadata or None
 
 
-def csv_options_from_args(args: argparse.Namespace) -> dict[str, int] | None:
-    options: dict[str, int] = {}
+def csv_options_from_args(args: argparse.Namespace) -> dict[str, int | str] | None:
+    options: dict[str, int | str] = {}
     if getattr(args, "csv_x_index", None) is not None:
         options["--csv-x-index"] = int(args.csv_x_index)
     if getattr(args, "csv_y_index", None) is not None:
         options["--csv-y-index"] = int(args.csv_y_index)
     if getattr(args, "csv_wkt_index", None) is not None:
         options["--csv-wkt-index"] = int(args.csv_wkt_index)
+    if getattr(args, "csv_x_col", None):
+        options["--csv-x-col"] = str(args.csv_x_col)
+    if getattr(args, "csv_y_col", None):
+        options["--csv-y-col"] = str(args.csv_y_col)
+    if getattr(args, "csv_wkt_col", None):
+        options["--csv-wkt-col"] = str(args.csv_wkt_col)
     return options or None
 
 
@@ -481,6 +490,12 @@ def build_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
         build_kwargs["csv_y_index"] = args.csv_y_index
     if getattr(args, "csv_wkt_index", None) is not None:
         build_kwargs["csv_wkt_index"] = args.csv_wkt_index
+    if getattr(args, "csv_x_col", None):
+        build_kwargs["csv_x_col"] = args.csv_x_col
+    if getattr(args, "csv_y_col", None):
+        build_kwargs["csv_y_col"] = args.csv_y_col
+    if getattr(args, "csv_wkt_col", None):
+        build_kwargs["csv_wkt_col"] = args.csv_wkt_col
     return build_kwargs
 
 
@@ -1754,11 +1769,18 @@ def dataset_options_text(dataset: dict[str, Any]) -> str:
         return ""
 
     labels: list[str] = []
-    for option_name in ("--csv-x-index", "--csv-y-index", "--csv-wkt-index"):
-        index = csv_options.get(option_name)
-        if index is None:
+    for option_name in (
+        "--csv-x-index",
+        "--csv-y-index",
+        "--csv-wkt-index",
+        "--csv-x-col",
+        "--csv-y-col",
+        "--csv-wkt-col",
+    ):
+        value = csv_options.get(option_name)
+        if value is None:
             continue
-        labels.append(f"{option_name}={index}")
+        labels.append(f"{option_name}={value}")
     return ", ".join(labels)
 
 
