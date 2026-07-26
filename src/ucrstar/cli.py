@@ -8,6 +8,7 @@ from logging.handlers import TimedRotatingFileHandler
 import re
 import shutil
 import sys
+import tempfile
 import uuid
 import urllib.error
 from dataclasses import dataclass
@@ -175,6 +176,7 @@ def main() -> None:
     dataset_parser.add_argument("dataset")
 
     args = parser.parse_args()
+    validate_csv_arguments(args)
     project_config = load_config(args.config)
     configure_runtime(project_config)
     logging_config = project_config.get("logging") or {}
@@ -344,6 +346,14 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--csv-y-col")
     parser.add_argument("--csv-wkt-col")
     parser.add_argument(
+        "--csv-segment-cols",
+        help="Comma-separated header names for x1,y1,x2,y2 line-segment endpoints in a CSV/TSV file.",
+    )
+    parser.add_argument(
+        "--csv-segment-indexes",
+        help="Comma-separated zero-based indexes for x1,y1,x2,y2 line-segment endpoints in a headerless CSV/TSV file.",
+    )
+    parser.add_argument(
         "--no-covering-bbox",
         action="store_true",
         default=None,
@@ -378,6 +388,10 @@ def csv_options_from_args(args: argparse.Namespace) -> dict[str, int | str] | No
         options["--csv-y-col"] = str(args.csv_y_col)
     if getattr(args, "csv_wkt_col", None):
         options["--csv-wkt-col"] = str(args.csv_wkt_col)
+    if getattr(args, "csv_segment_cols", None):
+        options["--csv-segment-cols"] = str(args.csv_segment_cols)
+    if getattr(args, "csv_segment_indexes", None):
+        options["--csv-segment-indexes"] = str(args.csv_segment_indexes)
     return options or None
 
 
@@ -496,7 +510,35 @@ def build_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
         build_kwargs["csv_y_col"] = args.csv_y_col
     if getattr(args, "csv_wkt_col", None):
         build_kwargs["csv_wkt_col"] = args.csv_wkt_col
+    if getattr(args, "csv_segment_cols", None):
+        build_kwargs["csv_segment_cols"] = args.csv_segment_cols
+    if getattr(args, "csv_segment_indexes", None):
+        build_kwargs["csv_segment_indexes"] = args.csv_segment_indexes
     return build_kwargs
+
+
+def validate_csv_arguments(args: argparse.Namespace) -> None:
+    csv_options = csv_options_from_args(args) or {}
+    has_segment_cols = "--csv-segment-cols" in csv_options
+    has_segment_indexes = "--csv-segment-indexes" in csv_options
+    if has_segment_cols and has_segment_indexes:
+        raise SystemExit("Use only one of --csv-segment-cols or --csv-segment-indexes.")
+
+    non_segment_options = {
+        "--csv-x-index",
+        "--csv-y-index",
+        "--csv-wkt-index",
+        "--csv-x-col",
+        "--csv-y-col",
+        "--csv-wkt-col",
+    }
+    if (has_segment_cols or has_segment_indexes) and any(option in csv_options for option in non_segment_options):
+        raise SystemExit("CSV segment options cannot be combined with other CSV geometry options.")
+
+    if has_segment_cols:
+        parse_csv_segment_cols(csv_options["--csv-segment-cols"])
+    if has_segment_indexes:
+        parse_csv_segment_indexes(csv_options["--csv-segment-indexes"])
 
 
 def add_dataset_from_source(
@@ -1131,6 +1173,7 @@ def process_registered_dataset(
     backup_name = f"{dataset_name}__backup_{uuid.uuid4().hex[:12]}" if replace_existing_dir else None
     build_dir = datasets_root / dataset_relative_path(temp_name)
     backup_dir = datasets_root / dataset_relative_path(backup_name) if backup_name else None
+    effective_build_kwargs = build_kwargs_for_dataset(dataset, build_kwargs)
     LOGGER.info("Processing dataset '%s' from %s", dataset["name"], source_url)
     prepared = prepare_dataset_source(dataset_dir, source_url, source)
     try:
@@ -1145,7 +1188,7 @@ def process_registered_dataset(
                 persist_source_copy(dataset_dir, prepared)
             write_source_summary(dataset_dir, prepared.source)
         else:
-            build_dataset(prepared.path, datasets_root, temp_name, True, build_kwargs)
+            build_dataset(prepared.path, datasets_root, temp_name, True, effective_build_kwargs)
             if prepared.source.get("type") != "local":
                 if replace_existing_dir or not prepared_path_is_cached_download(dataset_dir, prepared.path):
                     persist_source_copy(build_dir, prepared)
@@ -1154,7 +1197,7 @@ def process_registered_dataset(
                 swap_dataset_dirs(dataset_dir, build_dir, backup_dir)
                 cleanup_dataset_dir(datasets_root, backup_name)
         catalog.sync()
-        catalog.update_metadata(dataset_name, {"max_zoom": int(build_kwargs["zoom"])})
+        catalog.update_metadata(dataset_name, {"max_zoom": int(effective_build_kwargs["zoom"])})
         processed = catalog.get(dataset_name)
         if processed is None:
             raise RuntimeError(f"Dataset was built but not found in catalog: {dataset_name}")
@@ -1200,13 +1243,18 @@ def build_dataset(
     dataset_dir = Path(datasets_dir) / dataset_relative_path(dataset_name)
     dataset_dir.parent.mkdir(parents=True, exist_ok=True)
     LOGGER.info("Building Starlet dataset '%s' under %s", dataset_name, datasets_dir)
-    starlet.add_dataset(
-        str(input_path),
-        str(datasets_dir),
-        name=dataset_name,
-        overwrite=overwrite,
-        **build_kwargs,
-    )
+    prepared_input, starlet_build_kwargs, tempdir = prepare_build_input(input_path, build_kwargs)
+    try:
+        starlet.add_dataset(
+            str(prepared_input),
+            str(datasets_dir),
+            name=dataset_name,
+            overwrite=overwrite,
+            **starlet_build_kwargs,
+        )
+    finally:
+        if tempdir is not None:
+            tempdir.cleanup()
     LOGGER.info("Starlet build finished for dataset '%s'", dataset_name)
 
 
@@ -1592,6 +1640,137 @@ def merge_prepared_source_metadata(
     return updated
 
 
+def build_kwargs_for_dataset(dataset: dict[str, Any], build_kwargs: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(build_kwargs)
+    source = dataset.get("source") or {}
+    metadata = source.get("metadata") or {}
+    csv_options = metadata.get("csv_options") or {}
+    option_map: dict[str, str] = {
+        "--csv-x-index": "csv_x_index",
+        "--csv-y-index": "csv_y_index",
+        "--csv-wkt-index": "csv_wkt_index",
+        "--csv-x-col": "csv_x_col",
+        "--csv-y-col": "csv_y_col",
+        "--csv-wkt-col": "csv_wkt_col",
+        "--csv-segment-cols": "csv_segment_cols",
+        "--csv-segment-indexes": "csv_segment_indexes",
+    }
+    for option_name, kwarg_name in option_map.items():
+        if kwarg_name in resolved:
+            continue
+        value = csv_options.get(option_name)
+        if value is not None:
+            resolved[kwarg_name] = value
+    return resolved
+
+
+def prepare_build_input(
+    input_path: Path,
+    build_kwargs: dict[str, Any],
+) -> tuple[Path, dict[str, Any], tempfile.TemporaryDirectory[str] | None]:
+    resolved_kwargs = dict(build_kwargs)
+    segment_cols = resolved_kwargs.pop("csv_segment_cols", None)
+    segment_indexes = resolved_kwargs.pop("csv_segment_indexes", None)
+    if segment_cols is None and segment_indexes is None:
+        return input_path, resolved_kwargs, None
+
+    if segment_cols is not None and segment_indexes is not None:
+        raise ValueError("Use only one of csv_segment_cols or csv_segment_indexes.")
+    if input_path.suffix.lower() not in {".csv", ".tsv"}:
+        raise ValueError("CSV line-segment options require a .csv or .tsv input file.")
+
+    tempdir = tempfile.TemporaryDirectory(prefix="ucrstar-csv-segments-")
+    output_path = Path(tempdir.name) / input_path.name
+    delimiter = "\t" if input_path.suffix.lower() == ".tsv" else ","
+
+    if segment_cols is not None:
+        wkt_col = convert_segment_csv_by_name(input_path, output_path, parse_csv_segment_cols(segment_cols), delimiter)
+        resolved_kwargs["csv_wkt_col"] = wkt_col
+    else:
+        wkt_index = convert_segment_csv_by_index(
+            input_path,
+            output_path,
+            parse_csv_segment_indexes(segment_indexes),
+            delimiter,
+        )
+        resolved_kwargs["csv_wkt_index"] = wkt_index
+    return output_path, resolved_kwargs, tempdir
+
+
+def parse_csv_segment_cols(value: Any) -> tuple[str, str, str, str]:
+    parts = [part.strip() for part in str(value).split(",")]
+    if len(parts) != 4 or any(not part for part in parts):
+        raise SystemExit("--csv-segment-cols must be a comma-separated list of four column names.")
+    return parts[0], parts[1], parts[2], parts[3]
+
+
+def parse_csv_segment_indexes(value: Any) -> tuple[int, int, int, int]:
+    parts = [part.strip() for part in str(value).split(",")]
+    if len(parts) != 4 or any(not part for part in parts):
+        raise SystemExit("--csv-segment-indexes must be a comma-separated list of four zero-based indexes.")
+    try:
+        return tuple(int(part) for part in parts)  # type: ignore[return-value]
+    except ValueError as exc:
+        raise SystemExit("--csv-segment-indexes must contain integers only.") from exc
+
+
+def convert_segment_csv_by_name(
+    input_path: Path,
+    output_path: Path,
+    columns: tuple[str, str, str, str],
+    delimiter: str,
+) -> str:
+    x1_col, y1_col, x2_col, y2_col = columns
+    wkt_col = "__ucrstar_linestring_wkt"
+    with input_path.open("r", encoding="utf-8", newline="") as src, output_path.open(
+        "w",
+        encoding="utf-8",
+        newline="",
+    ) as dst:
+        reader = csv.DictReader(src, delimiter=delimiter)
+        fieldnames = list(reader.fieldnames or [])
+        missing = [name for name in columns if name not in fieldnames]
+        if missing:
+            raise ValueError(f"CSV file is missing line-segment column(s): {', '.join(missing)}")
+        writer = csv.DictWriter(dst, fieldnames=fieldnames + [wkt_col], delimiter=delimiter)
+        writer.writeheader()
+        for row in reader:
+            row[wkt_col] = linestring_wkt(row[x1_col], row[y1_col], row[x2_col], row[y2_col])
+            writer.writerow(row)
+    return wkt_col
+
+
+def convert_segment_csv_by_index(
+    input_path: Path,
+    output_path: Path,
+    indexes: tuple[int, int, int, int],
+    delimiter: str,
+) -> int:
+    max_index = max(indexes)
+    wkt_index = max_index + 1
+    with input_path.open("r", encoding="utf-8", newline="") as src, output_path.open(
+        "w",
+        encoding="utf-8",
+        newline="",
+    ) as dst:
+        reader = csv.reader(src, delimiter=delimiter)
+        writer = csv.writer(dst, delimiter=delimiter)
+        for row_number, row in enumerate(reader, start=1):
+            if len(row) <= max_index:
+                raise ValueError(
+                    f"CSV row {row_number} does not contain all four line-segment indexes {indexes}."
+                )
+            x1_idx, y1_idx, x2_idx, y2_idx = indexes
+            writer.writerow(
+                [*row, linestring_wkt(row[x1_idx], row[y1_idx], row[x2_idx], row[y2_idx])]
+            )
+    return wkt_index
+
+
+def linestring_wkt(x1: Any, y1: Any, x2: Any, y2: Any) -> str:
+    return f"LINESTRING({x1} {y1}, {x2} {y2})"
+
+
 def cached_download_path(dataset_dir: Path, source: dict[str, Any]) -> Path | None:
     download_dir = dataset_dir / "download"
     if not download_dir.exists():
@@ -1776,6 +1955,8 @@ def dataset_options_text(dataset: dict[str, Any]) -> str:
         "--csv-x-col",
         "--csv-y-col",
         "--csv-wkt-col",
+        "--csv-segment-cols",
+        "--csv-segment-indexes",
     ):
         value = csv_options.get(option_name)
         if value is None:

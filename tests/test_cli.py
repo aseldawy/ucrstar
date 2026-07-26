@@ -280,6 +280,149 @@ def test_add_dataset_passes_csv_column_names_to_starlet(
     }
 
 
+def test_add_dataset_converts_csv_segment_columns_to_wkt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = {}
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    input_path = tmp_path / "roads.csv"
+    input_path.write_text("x1,y1,x2,y2,name\n1,2,3,4,main\n", encoding="utf-8")
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        calls["input_arg"] = input_arg
+        calls["datasets_arg"] = datasets_arg
+        calls["kwargs"] = kwargs
+        calls["prepared_csv"] = Path(input_arg).read_text(encoding="utf-8")
+        (datasets_dir / kwargs["name"]).mkdir(parents=True)
+        return None, None, None
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(cli.starlet, "get_config", lambda: {"mvt": {"zoom": 10}})
+    monkeypatch.setattr(cli.starlet, "list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"LineString": 1}, "total_points": 2}],
+            "attributes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "add-dataset",
+            str(input_path),
+            "--name",
+            "roads",
+            "--csv-segment-cols",
+            "x1,y1,x2,y2",
+        ],
+    )
+
+    cli.main()
+
+    assert calls["input_arg"] != str(input_path)
+    assert calls["kwargs"]["csv_wkt_col"] == "__ucrstar_linestring_wkt"
+    assert "csv_segment_cols" not in calls["kwargs"]
+    assert "LINESTRING(1 2, 3 4)" in calls["prepared_csv"]
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    assert dataset["source"]["metadata"]["csv_options"] == {
+        "--csv-segment-cols": "x1,y1,x2,y2",
+    }
+
+
+def test_process_dataset_uses_stored_csv_segment_indexes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = {}
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    input_path = tmp_path / "roads.csv"
+    input_path.write_text("1,2,3,4,main\n", encoding="utf-8")
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    dataset = catalog.register_source(
+        "roads",
+        {
+            "type": "local",
+            "url": str(input_path.resolve()),
+            "accessed_at": "2026-07-26T00:00:00Z",
+            "modified_at": "2026-07-26T00:00:00Z",
+            "metadata": {"csv_options": {"--csv-segment-indexes": "0,1,2,3"}},
+        },
+        overwrite=True,
+    )
+
+    def fake_add_dataset(input_arg, datasets_arg, **kwargs):
+        calls["input_arg"] = input_arg
+        calls["kwargs"] = kwargs
+        calls["prepared_csv"] = Path(input_arg).read_text(encoding="utf-8")
+        (datasets_dir / kwargs["name"]).mkdir(parents=True)
+        return None, None, None
+
+    monkeypatch.setattr(cli.starlet, "add_dataset", fake_add_dataset)
+    monkeypatch.setattr(cli.starlet, "get_config", lambda: {"mvt": {"zoom": 10}})
+    monkeypatch.setattr(cli.starlet, "list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset_path: {
+            "name": "roads",
+            "path": str(dataset_path),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset_path: {
+            "description": "Roads",
+            "geometry": [{"geom_types": {"LineString": 1}, "total_points": 2}],
+            "attributes": [],
+        },
+    )
+
+    processed = cli.process_registered_dataset(
+        catalog,
+        dataset,
+        datasets_dir,
+        overwrite=False,
+        build_kwargs={"zoom": 10, "covering_bbox": True},
+        project_config={},
+    )
+
+    assert processed["dataset_state"] == "published"
+    assert calls["kwargs"]["csv_wkt_index"] == 4
+    assert "csv_segment_indexes" not in calls["kwargs"]
+    assert "LINESTRING(1 2, 3 4)" in calls["prepared_csv"]
+
+
 def test_write_dataset_list_shows_csv_options_from_database(capsys) -> None:
     cli.write_dataset_list(
         [
