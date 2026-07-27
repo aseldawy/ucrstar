@@ -1174,8 +1174,9 @@ def process_registered_dataset(
     build_dir = datasets_root / dataset_relative_path(temp_name)
     backup_dir = datasets_root / dataset_relative_path(backup_name) if backup_name else None
     effective_build_kwargs = build_kwargs_for_dataset(dataset, build_kwargs)
-    LOGGER.info("Processing dataset '%s' from %s", dataset["name"], source_url)
+    LOGGER.info("Processing dataset '%s' from %s in dir %s", dataset["name"], source_url, build_dir)
     prepared = prepare_dataset_source(dataset_dir, source_url, source)
+    LOGGER.info("Prepared dataset source for '%s' at %s", dataset_name, prepared)
     try:
         if prepared.source.get("type") != "local" and prepared.source.get("url") == source_url:
             catalog.update_state(dataset["id"], "downloaded")
@@ -1188,12 +1189,14 @@ def process_registered_dataset(
                 persist_source_copy(dataset_dir, prepared)
             write_source_summary(dataset_dir, prepared.source)
         else:
+            LOGGER.info("Building Starlet dataset '%s' under %s", dataset_name, build_dir)
             build_dataset(prepared.path, datasets_root, temp_name, True, effective_build_kwargs)
             if prepared.source.get("type") != "local":
                 if replace_existing_dir or not prepared_path_is_cached_download(dataset_dir, prepared.path):
                     persist_source_copy(build_dir, prepared)
             write_source_summary(build_dir, prepared.source)
             if replace_existing_dir and backup_dir is not None:
+                LOGGER.info("Replacing existing dataset dir %s with new build", dataset_dir)
                 swap_dataset_dirs(dataset_dir, build_dir, backup_dir)
                 cleanup_dataset_dir(datasets_root, backup_name)
         catalog.sync()
