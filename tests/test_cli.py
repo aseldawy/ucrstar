@@ -423,6 +423,100 @@ def test_process_dataset_uses_stored_csv_segment_indexes(
     assert "LINESTRING(1 2, 3 4)" in calls["prepared_csv"]
 
 
+def test_existing_build_is_current_false_when_only_download_exists(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "datasets" / "roads"
+    download_dir = dataset_dir / "download"
+    download_dir.mkdir(parents=True)
+    (download_dir / "roads.geojson").write_text("{}", encoding="utf-8")
+    (dataset_dir / "summary.json").write_text("{}", encoding="utf-8")
+
+    assert cli.existing_build_is_current(dataset_dir, {"type": "remote_file"}) is False
+
+
+def test_process_dataset_rebuilds_when_download_is_newer_than_outputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    dataset_dir = datasets_dir / "roads"
+    download_dir = dataset_dir / "download"
+    download_dir.mkdir(parents=True)
+    downloaded = download_dir / "roads.geojson"
+    downloaded.write_text("{}", encoding="utf-8")
+    (dataset_dir / "histograms").mkdir()
+    (dataset_dir / "mvt").mkdir()
+    (dataset_dir / "stats").mkdir()
+    (dataset_dir / "tiles.pmtiles").write_text("pmtiles", encoding="utf-8")
+    (dataset_dir / "histograms" / "global.npy").write_text("hist", encoding="utf-8")
+    (dataset_dir / "mvt" / "0.mvt").write_text("tile", encoding="utf-8")
+    (dataset_dir / "stats" / "attributes.json").write_text("{}", encoding="utf-8")
+
+    os.utime(downloaded, (downloaded.stat().st_atime, downloaded.stat().st_mtime + 10))
+
+    catalog = cli.DatasetCatalog(db_path, datasets_dir)
+    dataset = catalog.register_source(
+        "roads",
+        {
+            "type": "remote_file",
+            "url": "https://example.com/roads.geojson",
+            "accessed_at": "2026-07-27T00:00:00Z",
+            "modified_at": None,
+            "metadata": {},
+        },
+        overwrite=True,
+    )
+
+    calls: dict[str, object] = {}
+
+    def fake_prepare_dataset_source(dataset_path, source_url, source):
+        calls["prepared"] = True
+        return cli.SimplePreparedSource(path=download_dir, source=source)
+
+    def fake_build_dataset(input_path, datasets_root, dataset_name, overwrite, build_kwargs):
+        calls["built"] = {
+            "input_path": input_path,
+            "datasets_root": datasets_root,
+            "dataset_name": dataset_name,
+            "overwrite": overwrite,
+            "build_kwargs": build_kwargs,
+        }
+
+    monkeypatch.setattr(cli, "prepare_dataset_source", fake_prepare_dataset_source)
+    monkeypatch.setattr(cli, "build_dataset", fake_build_dataset)
+    monkeypatch.setattr(cli, "llm_from_config", lambda config: type("Llm", (), {"enabled": False})())
+    monkeypatch.setattr(cli.starlet, "list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset_path: {
+            "name": "roads",
+            "path": str(dataset_path),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset_path: {"description": "Roads", "attributes": []},
+    )
+
+    processed = cli.process_registered_dataset(
+        catalog,
+        dataset,
+        datasets_dir,
+        overwrite=False,
+        build_kwargs={"zoom": 10, "covering_bbox": True},
+        project_config={},
+    )
+
+    assert processed["dataset_state"] == "published"
+    assert "built" in calls
+
+
 def test_write_dataset_list_shows_csv_options_from_database(capsys) -> None:
     cli.write_dataset_list(
         [

@@ -1784,19 +1784,26 @@ def cached_download_path(dataset_dir: Path, source: dict[str, Any]) -> Path | No
 def existing_build_is_current(dataset_dir: Path, source: dict[str, Any]) -> bool:
     if not dataset_dir.exists():
         return False
-    try:
-        metadata = starlet.get_dataset_metadata(dataset_dir) or {}
-    except Exception:
+    if not dataset_build_outputs_exist(dataset_dir):
         return False
-    if not metadata.get("exists"):
-        return False
-    source_modified = parse_timestamp(source.get("modified_at"))
-    if source_modified is None:
+    download_modified = timestamp_from_path(cached_download_path(dataset_dir, source))
+    if download_modified is None:
         return True
     build_modified = build_timestamp_from_dataset_dir(dataset_dir)
     if build_modified is None:
         return False
-    return build_modified >= source_modified
+    return build_modified >= download_modified
+
+
+def dataset_build_outputs_exist(dataset_dir: Path) -> bool:
+    required_paths = [
+        dataset_dir / "histograms",
+        dataset_dir / "mvt",
+        dataset_dir / "stats",
+    ]
+    if not all(path.is_dir() for path in required_paths):
+        return False
+    return any((dataset_dir / name).is_file() for name in ("tiles.pmtiles", "tiles.mbtitles", "tiles.mbtiles"))
 
 
 def build_timestamp_from_dataset_dir(dataset_dir: Path) -> datetime | None:
