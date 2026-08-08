@@ -82,7 +82,7 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
         Path(app.config["DATABASE"]),
         Path(app.config["DATASETS_DIR"]),
     )
-    app.extensions["ucrstar_catalog"].sync()
+    app.extensions["ucrstar_catalog"].init_db()
     app.extensions["ucrstar_llm_registry"] = LLMRegistry(
         app.config["UCRSTAR2_CONFIG"],
         client_override=app.config.get("LLM_CLIENT"),

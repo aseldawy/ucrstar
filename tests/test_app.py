@@ -6,6 +6,23 @@ from ucrstar.app import create_app
 from ucrstar.catalog import DatasetCatalog
 
 
+def create_app_with_synced_catalog(
+    tmp_path: Path,
+    datasets_dir: Path,
+    *,
+    database: Path | None = None,
+) -> object:
+    db_path = database or tmp_path / "instance" / "test.sqlite"
+    DatasetCatalog(db_path, datasets_dir).sync()
+    return create_app(
+        {
+            "TESTING": True,
+            "DATASETS_DIR": datasets_dir,
+            "DATABASE": db_path,
+        }
+    )
+
+
 def test_datasets_endpoint_uses_catalog(tmp_path: Path, monkeypatch) -> None:
     datasets_dir = tmp_path / "datasets"
     (datasets_dir / "counties").mkdir(parents=True)
@@ -32,13 +49,7 @@ def test_datasets_endpoint_uses_catalog(tmp_path: Path, monkeypatch) -> None:
     )
 
     db_path = tmp_path / "instance" / "test.sqlite"
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": db_path,
-        }
-    )
+    app = create_app_with_synced_catalog(tmp_path, datasets_dir, database=db_path)
 
     assert db_path.exists()
     response = app.test_client().get("/datasets.json?geometry_type=Polygon")
@@ -50,49 +61,31 @@ def test_datasets_endpoint_uses_catalog(tmp_path: Path, monkeypatch) -> None:
     assert body["datasets"][0]["dataset_state"] == "published"
 
 
-def test_requests_do_not_sync_catalog(tmp_path: Path, monkeypatch) -> None:
+def test_create_app_initializes_database_without_syncing_datasets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     datasets_dir = tmp_path / "datasets"
     (datasets_dir / "counties").mkdir(parents=True)
 
-    monkeypatch.setattr("starlet.list_datasets", lambda root: ["counties"])
-    monkeypatch.setattr(
-        "starlet.get_dataset_metadata",
-        lambda dataset: {
-            "name": "counties",
-            "path": str(dataset),
-            "exists": True,
-            "size_bytes": 100,
-            "bbox": [-1, -2, 3, 4],
-            "has_mvt": False,
-        },
-    )
-    monkeypatch.setattr(
-        "starlet.get_dataset_summary",
-        lambda dataset: {
-            "description": "County boundaries",
-            "geometry": [{"geom_types": {"Polygon": 2}, "total_points": 12}],
-            "attributes": [],
-        },
-    )
+    def fail_list_datasets(root):
+        raise AssertionError("app startup should not scan dataset directories")
 
+    monkeypatch.setattr("starlet.list_datasets", fail_list_datasets)
+    db_path = tmp_path / "instance" / "test.sqlite"
     app = create_app(
         {
             "TESTING": True,
             "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "instance" / "test.sqlite",
+            "DATABASE": db_path,
         }
     )
 
-    def fail_sync(self):
-        raise AssertionError("catalog.sync should only run during app startup")
-
-    monkeypatch.setattr(DatasetCatalog, "sync", fail_sync)
+    assert db_path.exists()
     client = app.test_client()
-    dataset = client.get("/datasets.json").get_json()["datasets"][0]
+    body = client.get("/datasets.json").get_json()
 
-    assert dataset["name"] == "counties"
-    assert client.get(f"/datasets/{dataset['id']}.json").status_code == 200
-    assert client.get(f"/datasets/{dataset['id']}/style.json").status_code == 200
+    assert body["datasets"] == []
 
 
 def test_datasets_endpoint_defaults_to_published_state(tmp_path: Path) -> None:
@@ -212,13 +205,7 @@ def test_dataset_tiles_endpoint_uses_nested_dataset_url(
 
     monkeypatch.setattr("starlet.get_tile", fake_get_tile)
 
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "instance" / "test.sqlite",
-        }
-    )
+    app = create_app_with_synced_catalog(tmp_path, datasets_dir)
 
     client = app.test_client()
     dataset = client.get("/datasets.json").get_json()["datasets"][0]
@@ -273,13 +260,7 @@ def test_dataset_routes_accept_nested_dataset_names(
 
     monkeypatch.setattr("starlet.get_tile", fake_get_tile)
 
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "instance" / "test.sqlite",
-        }
-    )
+    app = create_app_with_synced_catalog(tmp_path, datasets_dir)
     client = app.test_client()
 
     detail = client.get("/datasets/osm21/roads.json")
@@ -325,13 +306,7 @@ def test_dataset_tiles_endpoint_forwards_requested_attributes(
 
     monkeypatch.setattr("starlet.get_tile", fake_get_tile)
 
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "instance" / "test.sqlite",
-        }
-    )
+    app = create_app_with_synced_catalog(tmp_path, datasets_dir)
 
     client = app.test_client()
     dataset = client.get("/datasets.json").get_json()["datasets"][0]
@@ -375,13 +350,7 @@ def test_vector_style_endpoint_uses_dataset_max_zoom(
         },
     )
 
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "instance" / "test.sqlite",
-        }
-    )
+    app = create_app_with_synced_catalog(tmp_path, datasets_dir)
 
     client = app.test_client()
     dataset = client.get("/datasets.json").get_json()["datasets"][0]
@@ -415,13 +384,7 @@ def test_dataset_style_endpoint(tmp_path: Path, monkeypatch) -> None:
         },
     )
 
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "instance" / "test.sqlite",
-        }
-    )
+    app = create_app_with_synced_catalog(tmp_path, datasets_dir)
     client = app.test_client()
     dataset = client.get("/datasets.json").get_json()["datasets"][0]
 
@@ -452,12 +415,10 @@ def test_small_dataset_details_select_geojson_visualization(tmp_path: Path, monk
             "attributes": [],
         },
     )
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "db.sqlite",
-        }
+    app = create_app_with_synced_catalog(
+        tmp_path,
+        datasets_dir,
+        database=tmp_path / "db.sqlite",
     )
     client = app.test_client()
     dataset = client.get("/datasets.json").get_json()["datasets"][0]
@@ -531,12 +492,10 @@ def test_one_megabyte_dataset_uses_vector_tiles(tmp_path: Path, monkeypatch) -> 
             "attributes": [],
         },
     )
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "db.sqlite",
-        }
+    app = create_app_with_synced_catalog(
+        tmp_path,
+        datasets_dir,
+        database=tmp_path / "db.sqlite",
     )
     client = app.test_client()
     dataset = client.get("/datasets.json").get_json()["datasets"][0]
@@ -620,13 +579,7 @@ def test_histogram_png_endpoint(tmp_path: Path, monkeypatch) -> None:
         },
     )
 
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "instance" / "test.sqlite",
-        }
-    )
+    app = create_app_with_synced_catalog(tmp_path, datasets_dir)
     client = app.test_client()
     dataset = client.get("/datasets.json").get_json()["datasets"][0]
 
@@ -673,13 +626,7 @@ def test_sample_geojson_returns_clean_feature(tmp_path: Path, monkeypatch) -> No
         },
     )
 
-    app = create_app(
-        {
-            "TESTING": True,
-            "DATASETS_DIR": datasets_dir,
-            "DATABASE": tmp_path / "instance" / "test.sqlite",
-        }
-    )
+    app = create_app_with_synced_catalog(tmp_path, datasets_dir)
     client = app.test_client()
     dataset = client.get("/datasets.json").get_json()["datasets"][0]
 

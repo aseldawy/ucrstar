@@ -163,6 +163,11 @@ def main() -> None:
     list_datasets_parser.add_argument("--state", default="all")
     list_datasets_parser.add_argument("--repository")
 
+    subparsers.add_parser(
+        "sync-datasets",
+        help="Scan dataset directories and refresh the SQLite catalog.",
+    )
+
     list_repositories_parser = subparsers.add_parser(
         "list-repositories",
         help="List repositories in the catalog.",
@@ -237,6 +242,10 @@ def main() -> None:
             LOGGER.info("Added %d dataset(s).", len(added))
         else:
             LOGGER.info("Added dataset %s with ID %s.", added["name"], added["id"])
+        return
+    if args.command == "sync-datasets":
+        synced = catalog.sync()
+        LOGGER.info("Synced %d dataset(s).", len(synced))
         return
     if args.command == "list-datasets":
         filters = {"state": args.state}

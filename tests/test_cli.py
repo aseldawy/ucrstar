@@ -45,6 +45,60 @@ def test_serve_prints_url_to_stdout(tmp_path: Path, monkeypatch, capsys) -> None
     assert calls["run"]["port"] == 8123
 
 
+def test_sync_datasets_scans_disk_and_updates_catalog(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    datasets_dir = tmp_path / "datasets"
+    (datasets_dir / "roads").mkdir(parents=True)
+    db_path = tmp_path / "instance" / "catalog.sqlite"
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setattr(cli.starlet, "list_datasets", lambda root: ["roads"])
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_metadata",
+        lambda dataset: {
+            "name": "roads",
+            "path": str(dataset),
+            "exists": True,
+            "size_bytes": 10,
+            "bbox": [0, 1, 2, 3],
+            "has_mvt": True,
+        },
+    )
+    monkeypatch.setattr(
+        cli.starlet,
+        "get_dataset_summary",
+        lambda dataset: {
+            "description": "Road network",
+            "geometry": [{"geom_types": {"LineString": 2}, "total_points": 12}],
+            "attributes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ucrstar",
+            "--datasets-dir",
+            str(datasets_dir),
+            "--database",
+            str(db_path),
+            "--config",
+            str(tmp_path / "missing-config.json"),
+            "sync-datasets",
+        ],
+    )
+
+    cli.main()
+
+    dataset = cli.DatasetCatalog(db_path, datasets_dir).get("roads")
+    assert dataset["name"] == "roads"
+    assert dataset["dataset_state"] == "published"
+    assert "Synced 1 dataset(s)." in caplog.text
+
+
 def test_add_dataset_builds_and_catalogs_dataset(
     tmp_path: Path,
     monkeypatch,

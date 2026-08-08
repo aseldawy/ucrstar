@@ -209,6 +209,15 @@ class DatasetCatalog:
                 dataset_dir = self.datasets_dir / dataset_relative_path(name)
                 if dataset_dir.exists():
                     names.add(name)
+            names = {
+                name
+                for name in names
+                if name in known
+                or not any(
+                    known_name.startswith(f"{name}/")
+                    for known_name in known
+                )
+            }
             sorted_names = sorted(names)
             LOGGER.info("Discovered %d dataset directorie(s) in %s", len(sorted_names), self.datasets_dir)
             for name in sorted_names:

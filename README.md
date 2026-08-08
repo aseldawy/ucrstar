@@ -140,6 +140,17 @@ Use `--create-only` to only insert the source record into the database in the
 `created` state. Use `--overwrite` to replace an existing dataset with the same
 name.
 
+The web server initializes the SQLite catalog schema at startup, but it does not
+scan dataset directories. If datasets were copied into `datasets/` outside the
+normal add/process/refresh commands, run an explicit sync:
+
+```bash
+.venv/bin/python src/ucrstar/cli.py sync-datasets
+```
+
+`sync-datasets` reads Starlet metadata and summaries from disk and upserts those
+datasets into the SQLite catalog.
+
 To process created datasets later:
 
 ```bash

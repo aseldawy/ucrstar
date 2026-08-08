@@ -840,7 +840,6 @@ class AssistantTools:
         if not isinstance(auto_select, bool):
             raise ValueError("auto_select must be a boolean")
 
-        self.catalog.sync()
         lexical = self.catalog.list({"q": query, "state": "published"})
         semantic: list[dict[str, Any]] = []
         if semantic_search:
